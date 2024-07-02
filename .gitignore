@@ -1,6 +1,6 @@
-*.pickle
 datasets/
 runs/
+tokenizers/
 
 .ipynb_checkpoints/
 __pycache__/
