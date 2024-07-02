@@ -18,7 +18,7 @@ def load_tokenized_dataset():
     # Load tokenizer + map
     tokenizer_filename = "bpe_tokenizer_ds_train_all_merges_35k.pickle" # "bpe_tokenizer_ds_train_all_merges_10k.pickle"
     print(f'Loading tokenizer {tokenizer_filename}')
-    (tokenize, detokenize), state = load_bpe_tokenizer(tokenizer_filename)
+    (tokenize, detokenize), state = load_bpe_tokenizer(f'tokenizers/{tokenizer_filename}')
     def encode_batch_map_func(batch):
         batch_str = [ x for x in batch['x']] + [ y for y in batch['y']]
         encoded = [ toks for toks in tokenize(batch_str)]

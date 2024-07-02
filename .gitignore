@@ -4,3 +4,5 @@ tokenizers/
 
 .ipynb_checkpoints/
 __pycache__/
+
+path/ 
