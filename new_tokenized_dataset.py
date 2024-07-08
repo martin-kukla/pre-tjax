@@ -3,6 +3,7 @@
 import datasets
 from datasets import load_dataset
 from tokenizer import *
+import numpy as np
 
 ###
 # DATASET
@@ -65,12 +66,14 @@ pad_and_trunc = lambda toks, seq_len: (toks + [0] * (seq_len - len(toks)))[:seq_
 pack_batch = lambda batch: [np.stack(el) for el in map(list, zip(*batch))]
 
 # Complete batch to batch_size with pad tokens only sequences 
-def complete_last_batch(batch, batch_size):
+def complete_last_batch(batch, batch_size, seq_len):
     for _ in range(batch_size - len(batch)):
-        x = np.zeros(seq_len)
-        y = np.zeros(seq_len)
+        x = np.zeros(seq_len, dtype=int)
+        y_plus_one = np.zeros(seq_len+1, dtype=int)
+        y = y_plus_one[:-1]
+        
         x_mask, y_mask, yx_mask = build_masks(x,y)
-        batch.append((x, y, x_mask, y_mask, yx_mask))
+        batch.append((x, y_plus_one, x_mask, y_mask, yx_mask, np.arange(seq_len), np.arange(seq_len)))
     return batch
 
 def ones_block_diag(lens_dim0, lens_dim1):
@@ -112,7 +115,8 @@ def convert_batch_item(x, y, seq_len, x_lens=None, y_lens=None):
         x_packs, y_packs, yx_packs = create_packs(x_lens, y_lens)
         x_indices, y_indices = create_indices(x_lens), create_indices(y_lens)
     else:
-        x_packs, y_packs, yx_packs, x_indices, y_indices = None, None, None, None, None
+        x_packs, y_packs, yx_packs = None, None, None
+        x_indices, y_indices = np.arange(seq_len), np.arange(seq_len)
         
     x_mask, y_mask, yx_mask = build_masks(x,y, x_packs, y_packs, yx_packs)
     return (x, y_plus_one, x_mask, y_mask, yx_mask, x_indices, y_indices)
@@ -122,13 +126,13 @@ def get_batched_examples(ds, batch_size, seq_len, start_tok, end_tok, split="tra
 
     batch = []
     for item in ds_split:
-        item_y = [START_TOK] + item['y'] + [END_TOK]
+        item_y = [start_tok] + item['y'] + [end_tok]
         batch.append(convert_batch_item(item['x'], item_y, seq_len))
         if len(batch) == batch_size:
             yield pack_batch(batch)
             batch = []
     if split!="train" and len(batch) > 0: # Note I don't use last few rows left in train split..
-        yield pack_batch(complete_last_batch(batch, batch_size))
+        yield pack_batch(complete_last_batch(batch, batch_size, seq_len))
 
 def get_batched_examples_packed(ds, batch_size, seq_len, start_tok, end_tok, pack_frac = 0.5, split="train", skip_n_rows=None):
     assert split=="train"
@@ -138,7 +142,7 @@ def get_batched_examples_packed(ds, batch_size, seq_len, start_tok, end_tok, pac
     batch_x_lens = []
     batch_y_lens = []
     for item in ds_split:
-        item_y = [START_TOK] + item['y'] + [END_TOK]
+        item_y = [start_tok] + item['y'] + [end_tok]
         
         # Either append to previous batch item or create new one
         if len(batch)>0 and (len(batch[-1][0]) < seq_len * pack_frac and len(batch[-1][1]) < seq_len * pack_frac):
@@ -157,6 +161,7 @@ def get_batched_examples_packed(ds, batch_size, seq_len, start_tok, end_tok, pac
             
             yield pack_batch(batch)
             batch = []
-            
+
+    # TODO: the block below will be never called
     if split!="train" and len(batch) > 0: # Note I don't use last few rows left in train split..
-        yield pack_batch(complete_last_batch(batch, batch_size))
+        yield pack_batch(complete_last_batch(batch, batch_size, seq_len))
