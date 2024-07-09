@@ -155,8 +155,6 @@ def get_batched_examples_packed(ds, batch_size, seq_len, start_tok, end_tok, pac
             batch_y_lens.append([len(item_y)])
             
         if len(batch) == batch_size:
-            print(batch_x_lens)
-            print(batch_y_lens)
             batch = [convert_batch_item(*it, seq_len, x_lens, y_lens) for it, x_lens, y_lens in zip(batch, batch_x_lens, batch_y_lens)]
             
             yield pack_batch(batch)
