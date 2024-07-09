@@ -145,19 +145,20 @@ def tlayer_with_cross_attn_fwd(layer_params, y, mask, x, yx_mask, key, train=Tru
     y = layernorm_fwd(layer_params[-2:], y)
     return y
 
-def pos_encodings(x): # input: seq_len x emb_dim
+def pos_encodings(x, indices): # input: seq_len x emb_dim
     seq_len, emb_dim = x.shape
 
-    indices = jnp.arange(seq_len)[:, None] 
+    #indices = jnp.arange(seq_len)[:, None] 
+    indices = indices[:, None] 
     div_term = jnp.fromfunction(lambda i: 1 / pow(10000, 2 * i/emb_dim), (int(emb_dim/2),), dtype=float)[None, :]
     pos_array = jnp.dot(indices, div_term)
     return jnp.stack((jnp.sin(pos_array), jnp.cos(pos_array)), axis=2).reshape(seq_len, emb_dim)
 
 # TODO: unify tlayer(s) with tlayer(s)_with_cross_attention, but that jit works correctly
-def tlayers_fwd(params, y, mask, key, train=True): # input: seq_len x
+def tlayers_fwd(params, y, mask, indices, key, train=True): # input: seq_len x
     key, dropout_key = random.split(key, 2)
     y = embed(params[0], y)
-    y = dropout(y + pos_encodings(y), dropout_key, train)
+    y = dropout(y + pos_encodings(y, indices), dropout_key, train)
     
     for layer_params in params[1:]:
         key, tlayer_key = random.split(key, 2)
@@ -180,10 +181,10 @@ def tlayers_fwd_scanned(params, y, mask, key, train=True): # input: seq_len x
     
     return y_and_key[0]
 
-def tlayers_with_cross_attn_fwd(params, y, mask, x, yx_mask, key, train=True): # input: seq_len x
+def tlayers_with_cross_attn_fwd(params, y, mask, x, yx_mask, y_indices, key, train=True): # input: seq_len x
     keys = random.split(key, len(params) )
     y = embed(params[0], y)
-    y = dropout(y + pos_encodings(y), keys[0], train)
+    y = dropout(y + pos_encodings(y, y_indices), keys[0], train)
     
     for layer_params, layer_key in zip(params[1:], keys[1:]):
         y = tlayer_with_cross_attn_fwd(layer_params, y, mask, x, yx_mask, layer_key, train)
@@ -204,31 +205,17 @@ def tlayers_with_cross_attn_fwd_scanned(params, y, mask, x, yx_mask, key, train=
     
     return y_and_key[0]
 
-def forward(params, x, y, x_mask, y_mask, yx_mask, key, train): # input: seq_len x
+def forward(params, x, y, x_mask, y_mask, yx_mask, x_indices, y_indices, key, train): # input: seq_len x
     layers = int((len(params) -1) /2)
     keys = random.split(key, 2)
-
-    # Mask padded x tokens
-    #x_mask = jnp.ones((x.shape[0], x.shape[0]))
-    #x_pad_mask = jnp.where(x != 0, jnp.ones((x.shape[0])), 0)
-    #x_mask = jnp.multiply(jnp.multiply(x_mask, x_pad_mask), x_pad_mask[:, None])
     
-    x = tlayers_fwd(params[:layers+1], x, x_mask, keys[0], train=train)
+    x = tlayers_fwd(params[:layers+1], x, x_mask, x_indices, keys[0], train=train)
     #x = tlayers_fwd_scanned(params[:2], x, x_mask, keys[0], train=train)
-
-    # Mask padded y tokens + add "autoregressive" mask
-    #y_pad_mask = jnp.where(y != 0, jnp.ones((y.shape[0])), 0)
-    #y_mask = jnp.tri(y.shape[0], y.shape[0])
-    #y_mask = jnp.multiply(jnp.multiply(y_mask, y_pad_mask), y_pad_mask[:, None])
-
-    # Mask padded yx tokens
-    #yx_mask = jnp.ones((y.shape[0], x.shape[0]))
-    #yx_mask = jnp.multiply(jnp.multiply(yx_mask, x_pad_mask), y_pad_mask[:, None])
     
-    y = tlayers_with_cross_attn_fwd([params[0]] + params[layers+1:], y, y_mask, x, yx_mask, keys[1], train=train)
+    y = tlayers_with_cross_attn_fwd([params[0]] + params[layers+1:], y, y_mask, x, yx_mask, y_indices, keys[1], train=train)
     #y = tlayers_with_cross_attn_fwd_scanned([params[0], params[2]], y, y_mask, x, yx_mask, keys[1], train=train)
     y = linear_fwd(params[0], y) 
     return y
 
 #batched_forward = jit(vmap(forward, in_axes=(None, 0, 0, None, None)), static_argnames=['train'])
-batched_forward = vmap(forward, in_axes=(None, 0, 0, 0, 0, 0, None, None))
+batched_forward = vmap(forward, in_axes=(None, 0, 0, 0, 0, 0, 0, 0, None, None))
