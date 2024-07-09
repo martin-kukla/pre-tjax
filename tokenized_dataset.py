@@ -3,7 +3,11 @@
 import datasets
 from datasets import load_dataset
 from tokenizer import *
+import numpy as np
 
+###
+# DATASET
+###
 def load_wmt14_dataset(streaming=False):
     # load dataset
     print(f'Loading dataset')
@@ -30,74 +34,132 @@ def load_tokenized_dataset():
     ds = ds.map(encode_batch_map_func, batched=True, num_proc=12, batch_size=50) 
     return ds, (tokenize, detokenize, len(state[0][0])) # dataset, tokenizer_state (..,.., vocab_len)
 
-def _pad_xy_batch(batch, pad_length):
-    def pad_tokens_list(tokens_list):
-        pad = lambda toks: toks + [0] * (pad_length - len(toks))
-        return [pad(toks)[:pad_length] for toks in tokens_list]
-    return map(lambda x: pad_tokens_list(x), map(list, zip(*batch)))
+
+###
+# DATA COLLATOR
+###
+
+def build_masks(x, y, x_packs=None, y_packs=None, yx_packs=None): # x: seq_len, y: seq_len
+    # Mask padded x tokens
+    x_mask = np.ones((x.shape[0], x.shape[0]))
+    x_pad_mask = np.where(x != 0, np.ones((x.shape[0])), 0)
+    x_mask = np.multiply(np.multiply(x_mask, x_pad_mask), x_pad_mask[:, None])
+    if x_packs is not None:
+        x_mask = np.multiply(x_mask, x_packs)
+
+    # Mask padded y tokens + add "autoregressive" mask
+    y_pad_mask = np.where(y != 0, np.ones((y.shape[0])), 0)
+    y_mask = np.tri(y.shape[0], y.shape[0])
+    y_mask = np.multiply(np.multiply(y_mask, y_pad_mask), y_pad_mask[:, None])
+    if y_packs is not None:
+        y_mask = np.multiply(y_mask, y_packs)
+
+    # Mask padded yx tokens
+    yx_mask = np.ones((y.shape[0], x.shape[0]))
+    yx_mask = np.multiply(np.multiply(yx_mask, x_pad_mask), y_pad_mask[:, None])
+    if yx_packs is not None:
+        yx_mask = np.multiply(yx_mask, yx_packs)
+
+    return x_mask, y_mask, yx_mask
+
+pad_and_trunc = lambda toks, seq_len: (toks + [0] * (seq_len - len(toks)))[:seq_len]
+pack_batch = lambda batch: [np.stack(el) for el in map(list, zip(*batch))]
+
+# Complete batch to batch_size with pad tokens only sequences 
+def complete_last_batch(batch, batch_size, seq_len):
+    for _ in range(batch_size - len(batch)):
+        x = np.zeros(seq_len, dtype=int)
+        y_plus_one = np.zeros(seq_len+1, dtype=int)
+        y = y_plus_one[:-1]
+        
+        x_mask, y_mask, yx_mask = build_masks(x,y)
+        batch.append((x, y_plus_one, x_mask, y_mask, yx_mask, np.arange(seq_len), np.arange(seq_len)))
+    return batch
+
+def ones_block_diag(lens_dim0, lens_dim1):
+    result = np.zeros((sum(lens_dim0), sum(lens_dim1)))
+    start_ind_dim0 = 0
+    start_ind_dim1 = 0
+    for len_dim0, len_dim1 in zip(lens_dim0, lens_dim1):
+        result[start_ind_dim0:start_ind_dim0+len_dim0, start_ind_dim1:start_ind_dim1+len_dim1] = np.ones((len_dim0, len_dim1))
+        start_ind_dim0 +=len_dim0
+        start_ind_dim1 +=len_dim1
+    return result
+
+def create_packs(x_lens, y_lens):
+    x_packs = ones_block_diag(x_lens, x_lens)
+    y_packs = ones_block_diag(y_lens, y_lens)
+    yx_packs = ones_block_diag(y_lens, x_lens)
+    return x_packs, y_packs, yx_packs
+
+def create_indices(lens):
+    return np.concatenate([np.arange(el_len) for el_len in lens])
     
-def get_batched_examples(ds, batch_size, seq_len, split="train", skip_n_rows=None):
-    ds_split = ds[split].skip(skip_n_rows) if skip_n_rows is not None else ds[split]
-    
+def convert_batch_item(x, y, seq_len, x_lens=None, y_lens=None):
+    x = np.array(pad_and_trunc(x, seq_len))
+    y_plus_one = np.array(pad_and_trunc(y, seq_len + 1)) # We need "+1" version for training
+    y = y_plus_one[:-1]
+
+    # Account for packing
+    if x_lens is not None:
+        assert y_lens is not None
+        # Trunc ?_lens up to seq_len
+        def trunc_lens(lens):
+            if sum(lens)>seq_len:
+                lens[-1] = seq_len - sum(lens[:-1])
+            else: # TODO: untested
+                lens.append(seq_len - sum(lens))
+            return lens
+        x_lens = trunc_lens(x_lens)
+        y_lens = trunc_lens(y_lens)
+        x_packs, y_packs, yx_packs = create_packs(x_lens, y_lens)
+        x_indices, y_indices = create_indices(x_lens), create_indices(y_lens)
+    else:
+        x_packs, y_packs, yx_packs = None, None, None
+        x_indices, y_indices = np.arange(seq_len), np.arange(seq_len)
+        
+    x_mask, y_mask, yx_mask = build_masks(x,y, x_packs, y_packs, yx_packs)
+    return (x, y_plus_one, x_mask, y_mask, yx_mask, x_indices, y_indices)
+                
+def get_batched_examples(ds, batch_size, seq_len, start_tok, end_tok, split="train", skip_n_rows=None):
+    ds_split = ds[split].skip(skip_n_rows) if skip_n_rows is not None else ds[split]    
+
     batch = []
     for item in ds_split:
-        batch.append((item['x'],item['y']))
+        item_y = [start_tok] + item['y'] + [end_tok]
+        batch.append(convert_batch_item(item['x'], item_y, seq_len))
         if len(batch) == batch_size:
-            yield _pad_xy_batch(batch, seq_len)
+            yield pack_batch(batch)
             batch = []
-    # TODO XXX: note I don't use few last rows left in train split
-    if split!="train" and len(batch) > 0:
-        # Adds the sequences consisting of pad tokens only
-        # so batch_size is consistent, and vmap doesn't do more caching
-        for _ in range(batch_size - len(batch)):
-            batch.append(([0]*seq_len,[0] * seq_len))
-        yield _pad_xy_batch(batch, seq_len)
+    if split!="train" and len(batch) > 0: # Note I don't use last few rows left in train split..
+        yield pack_batch(complete_last_batch(batch, batch_size, seq_len))
 
 def get_batched_examples_packed(ds, batch_size, seq_len, start_tok, end_tok, pack_frac = 0.5, split="train", skip_n_rows=None):
+    assert split=="train"
     ds_split = ds[split].skip(skip_n_rows) if skip_n_rows is not None else ds[split]
     
     batch = []
+    batch_x_lens = []
+    batch_y_lens = []
     for item in ds_split:
-        # Either append to previous batch item or create new batch item
-        if split=="train" and len(batch)>0 and (len(batch[-1][0]) < seq_len * pack_frac and len(batch[-1][1]) < seq_len * pack_frac):
-            pack_func = lambda x, y: x + [end_tok, start_tok] + y
-            batch[-1] = (pack_func(batch[-1][0], item['x']), pack_func(batch[-1][1], item['y']))
+        item_y = [start_tok] + item['y'] + [end_tok]
+        
+        # Either append to previous batch item or create new one
+        if len(batch)>0 and (len(batch[-1][0]) < seq_len * pack_frac and len(batch[-1][1]) < seq_len * pack_frac):
+            batch[-1] = (batch[-1][0] + item['x'], batch[-1][1] +  item_y)
+            batch_x_lens[-1].append(len(item['x']))
+            batch_y_lens[-1].append(len(item_y))
         else:
-            batch.append((item['x'],item['y']))
+            batch.append((item['x'],item_y))
+            batch_x_lens.append([len(item['x'])])
+            batch_y_lens.append([len(item_y)])
             
         if len(batch) == batch_size:
-            yield _pad_xy_batch(batch, seq_len)
-            batch = []
+            batch = [convert_batch_item(*it, seq_len, x_lens, y_lens) for it, x_lens, y_lens in zip(batch, batch_x_lens, batch_y_lens)]
             
-    # TODO XXX: note I don't use few last rows left in train split
-    if split!="train" and len(batch) > 0:
-        # Adds the sequences consisting of pad tokens only
-        # so batch_size is consistent, and vmap doesn't do more caching
-        for _ in range(batch_size - len(batch)):
-            batch.append(([0]*seq_len,[0] * seq_len))
-        yield _pad_xy_batch(batch, seq_len)
+            yield pack_batch(batch)
+            batch = []
 
-def get_batched_examples_per_length(ds, total_tokens, split="train", approx_k=100):
-    # Transformer's memory scales according to O(L^2 * N), where L is seq len, and N is batch size.
-    # In order to choose batch size for different L without encountering OOMs later, we make the following heuristics:
-    # 1) L * N <= total_tokens
-    # 2) L^2 * N <= approx_k * total_tokens - this will only affect Ls bigger than approx_k i.e. beyond approx_k
-    # i.e. For L<approx_k, N is inversely proportional to L. For L> approx_k, N is inversely proportial to L^2
-    # TODO XXX: this is "quick and dirty", I should revist e.g., shouldn't 2) alone be enough? (First, make model more efficient though)
-    
-    # Use fixed bins for now
-    max_length = 250 # TODO XXX: how many datapoints we truncate in training/eval?
-    bin_width = 10
-    batch_bins = [[] for _ in range(int(max_length/bin_width)+1)]
-    
-    for item in ds[split]:
-        bin_i = (min(len(item['x']), max_length) +  bin_width - 1) // bin_width # ceil 
-        batch_bins[bin_i].append((item['x'][:max_length],item['y'][:max_length]))
-        bin_seq_len = bin_i * bin_width
-        bin_total_tokens = len(batch_bins[bin_i]) * bin_seq_len
-        if len(batch_bins[bin_i]) >= approx_k * total_tokens / pow(bin_seq_len, 2) or bin_total_tokens>total_tokens:
-            yield _pad_xy_batch(batch_bins[bin_i], bin_i * bin_width)
-            batch_bins[bin_i] = []
-    for bin_i in range(len(batch_bins)):
-        if len(batch_bins[bin_i]) > 0:
-            yield _pad_xy_batch(batch_bins[bin_i], bin_i * bin_width)
+    # TODO: the block below will be never called
+    if split!="train" and len(batch) > 0: # Note I don't use last few rows left in train split..
+        yield pack_batch(complete_last_batch(batch, batch_size, seq_len))
