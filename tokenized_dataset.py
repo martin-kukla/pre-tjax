@@ -159,6 +159,8 @@ def get_batched_examples_packed(ds, batch_size, seq_len, start_tok, end_tok, pac
             
             yield pack_batch(batch)
             batch = []
+            batch_x_lens = []
+            batch_y_lens = []
 
     # TODO: the block below will be never called
     if split!="train" and len(batch) > 0: # Note I don't use last few rows left in train split..
