@@ -60,6 +60,17 @@ def init_transformer(vocab_size, emb_dim, layers, num_heads, ffn_dim, key):
     params = [list(p) for p in params]        
     return params
 
+def init_transformer_gpt2like(vocab_size, emb_dim, layers, num_heads, ffn_dim, key):
+    all_keys = random.split(key, 1 + layers)
+
+    decoder_params = [init_tlayer(emb_dim, num_heads, ffn_dim, k) for k in all_keys[1:]]
+
+    params = ( [init_linear_layer(emb_dim, vocab_size, all_keys[0])] 
+    + decoder_params)
+
+    params = [list(p) for p in params]        
+    return params
+
 ### MODEL
 
 def log_softmax(x_logits): # compute log_softmax from logits over the last dimension
@@ -219,3 +230,13 @@ def forward(params, x, y, x_mask, y_mask, yx_mask, x_indices, y_indices, key, tr
 
 #batched_forward = jit(vmap(forward, in_axes=(None, 0, 0, None, None)), static_argnames=['train'])
 batched_forward = vmap(forward, in_axes=(None, 0, 0, 0, 0, 0, 0, 0, None, None))
+
+def forward_gpt2like(params, y, y_mask, y_indices, key, train): # input: seq_len x
+    keys = random.split(key, 2)
+    
+    y = tlayers_fwd(params, y, y_mask, y_indices, keys[0], train=train)
+    
+    y = linear_fwd(params[0], y) 
+    return y
+
+batched_forward_gpt2like = vmap(forward_gpt2like, in_axes=(None, 0, 0, 0, None, None))
