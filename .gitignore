@@ -6,3 +6,5 @@ tokenizers/
 __pycache__/
 
 path/ 
+
+wandb/
