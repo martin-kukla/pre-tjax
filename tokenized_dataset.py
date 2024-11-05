@@ -15,6 +15,13 @@ def load_wmt14_dataset(streaming=False):
     ds = ds.map(lambda item: {'x':item['translation']["en"], 'y':item['translation']["de"]}, remove_columns=["translation"], batched=False, num_proc=12)
 
     return ds
+
+def load_fineweb_edu_dataset(split, streaming=False):
+    # load dataset
+    print(f'Loading dataset')
+    ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split=split, streaming=streaming, cache_dir="datasets/") # sample-10BT: 9.67mln rows
+    ds = ds.map(lambda item: {'x':"", 'y':item['text']}, batched=False).select_columns(['x','y']) # mocks x for compatibility (effectively it will be ignored)
+    return ds
     
 def load_tokenized_dataset():
     ds = load_wmt14_dataset()
@@ -32,6 +39,23 @@ def load_tokenized_dataset():
     print(f'Tokenizing dataset')
     # TODO XXX: this sometimes hangs because of waiting for procs, should we reduce num_proc if loading from cache anyway?
     ds = ds.map(encode_batch_map_func, batched=True, num_proc=12, batch_size=50) 
+    return ds, (tokenize, detokenize, len(state[0][0])) # dataset, tokenizer_state (..,.., vocab_len)
+    
+def load_tokenized_dataset_gpt2(split="train"):
+    ds = load_fineweb_edu_dataset(split)
+    
+    # Load tokenizer + map
+    tokenizer_filename = "bpe_tokenizer_fineweb-edu_sample-10BT_100k_ds_merges_30k.pickle"
+    print(f'Loading tokenizer {tokenizer_filename}')
+    (tokenize, detokenize), state = load_bpe_tokenizer(f'tokenizers/{tokenizer_filename}')
+    def encode_batch_map_func(batch):
+        return {'y': [ toks for toks in tokenize(batch['y'])]}
+    # Regarding batch_size below, the op is likely becoming memory-bound with bigger batch_size.
+    # TODO: it would be worth investigating it, but I am skiping it in interest of time
+    print(f'Tokenizing dataset')
+    # TODO XXX: this sometimes hangs because of waiting for procs, should we reduce num_proc if loading from cache anyway?
+    ds = ds.map(encode_batch_map_func, batched=True, num_proc=12, batch_size=50) 
+    ds = ds.map(lambda item: {'x': []}, batched=False, num_proc=12) # mock x for compatibility
     return ds, (tokenize, detokenize, len(state[0][0])) # dataset, tokenizer_state (..,.., vocab_len)
 
 
