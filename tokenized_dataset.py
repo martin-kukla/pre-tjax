@@ -171,7 +171,8 @@ def convert_batch_item(x, y, seq_len, x_lens=None, y_lens=None):
     return (x, y_plus_one, x_mask, y_mask, yx_mask, x_indices, y_indices)
                 
 def get_batched_examples(ds, batch_size, seq_len, start_tok, end_tok, split="train", skip_n_rows=None):
-    ds_split = ds[split].skip(skip_n_rows) if skip_n_rows is not None else ds[split]    
+    ds_split = ds[split] if split is not None else ds
+    ds_split = ds_split.skip(skip_n_rows) if skip_n_rows is not None else ds_split    
 
     batch = []
     for item in ds_split:
