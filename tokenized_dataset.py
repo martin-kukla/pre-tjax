@@ -69,18 +69,23 @@ def load_tokenized_dataset_hellaswag(tokenize):
     ds = load_hellaswag_dataset()
     
     # tokenize
-    def encode_y(batch):
-        return {'y': [ toks for toks in tokenize(batch['y'])]}
-    def encode_x(item):
-        #tokenize_item = lambda item: [ toks for toks in tokenize(item)]
-        return {'x': [ toks for toks in tokenize(item['x'])]}
+
+    # flatten tokenized choices + label with padding token in between: 
+    def pack_choices_in_x(choices, label): 
+        toks_list = [toks for toks in tokenize(choices)]
+        res = []
+        for toks in toks_list+[[int(label)]]: #TODO: rewrite it nicely "0.join"
+            res.extend(toks)
+            res.append(0)
+        return res[:-1]     
+    def encode(batch):
+        flattened_x_toks = [pack_choices_in_x(choices, label) for choices, label in zip(batch['x'], batch['label'])]
+        return {'x':flattened_x_toks, 'y': [ toks for toks in tokenize(batch['y'])]}
     # Regarding batch_size below, the op is likely becoming memory-bound with bigger batch_size.
     # TODO: it would be worth investigating it, but I am skiping it in interest of time
     print(f'Tokenizing dataset')
     # TODO XXX: this sometimes hangs because of waiting for procs, should we reduce num_proc if loading from cache anyway?
-    ds = ds.map(encode_y, batched=True, num_proc=12, batch_size=50) 
-    ds = ds.map(encode_x, batched=False, num_proc=12) # TODO: batch it
-    ds = ds.map(lambda item: {'label': int(item['label'])}, batched=False, num_proc=12) 
+    ds = ds.map(encode, batched=True, num_proc=12, batch_size=50).select_columns(['x','y'])
     return ds
 
 
