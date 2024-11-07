@@ -74,7 +74,7 @@ def load_tokenized_dataset_hellaswag(tokenize):
     def pack_choices_in_x(choices, label): 
         toks_list = [toks for toks in tokenize(choices)]
         res = []
-        for toks in toks_list+[[int(label)]]: #TODO: rewrite it nicely "0.join"
+        for toks in toks_list+[[int(label)+1]]: # note shifting label by 1, so we don't overload "0" token #TODO: rewrite the loop nicely "0.join"
             res.extend(toks)
             res.append(0)
         return res[:-1]     
