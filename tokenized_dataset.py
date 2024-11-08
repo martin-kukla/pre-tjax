@@ -65,6 +65,15 @@ def load_tokenized_dataset_gpt2(split="train"):
     ds = ds.map(lambda item: {'x': []}, batched=False, num_proc=12) # mock x for compatibility
     return ds, (tokenize, detokenize, len(state[0][0])) # dataset, tokenizer_state (..,.., vocab_len)
 
+def unpack_hellaswag_x(item_x):
+    choices = []
+    while 0 in item_x:
+        ind=item_x.index(0)
+        choices.append(item_x[:ind])
+        item_x = item_x[ind+1:]
+    assert len(item_x)==1
+    return choices, item_x[0]-1 # note shifting label by one, as we don't want to overload "0" token
+    
 def load_tokenized_dataset_hellaswag(tokenize):
     ds = load_hellaswag_dataset()
     
