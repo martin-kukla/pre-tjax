@@ -216,7 +216,7 @@ def tlayers_with_cross_attn_fwd_scanned(params, y, mask, x, yx_mask, key, train=
     
     return y_and_key[0]
 
-def forward(params, x, y, x_mask, y_mask, yx_mask, x_indices, y_indices, key, train): # input: seq_len x
+def forward_aiayn(params, x, y, x_mask, y_mask, yx_mask, x_indices, y_indices, key, train): # input: seq_len x
     layers = int((len(params) -1) /2)
     keys = random.split(key, 2)
     
@@ -228,8 +228,8 @@ def forward(params, x, y, x_mask, y_mask, yx_mask, x_indices, y_indices, key, tr
     y = linear_fwd(params[0], y) 
     return y
 
-#batched_forward = jit(vmap(forward, in_axes=(None, 0, 0, None, None)), static_argnames=['train'])
-batched_forward = vmap(forward, in_axes=(None, 0, 0, 0, 0, 0, 0, 0, None, None))
+#batched_forward = jit(vmap(forward_aiyan, in_axes=(None, 0, 0, None, None)), static_argnames=['train'])
+batched_forward_aiayn = vmap(forward_aiayn, in_axes=(None, 0, 0, 0, 0, 0, 0, 0, None, None))
 
 def forward_gpt2like(params, y, y_mask, y_indices, key, train): # input: seq_len x
     keys = random.split(key, 2)
