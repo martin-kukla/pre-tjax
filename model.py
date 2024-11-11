@@ -105,15 +105,10 @@ def tlayer_attn_head_fwd(layer_params, qkv, mask): # input: seq_len x emb_dim
 tlayer_attn_heads_fwd = vmap(tlayer_attn_head_fwd, in_axes=(0, None, None))
 
 def tlayer_attn_fwd(layer_params, qkv, mask): # input: seq_len x emb_dim
-    # TODO: why with projection learning is slower/worse (update: validate that it's worse)?
-    # NOTE, this is a jit hack: if is architectural i.e. it doens't change across execution, so it should not cause issues for lax'tracing
-    if len(layer_params) > 0: 
-        num_heads = int((len(layer_params)-1)/3)
-        heads_attns = tlayer_attn_heads_fwd(layer_params[0], qkv, mask)
-        attn = jnp.concatenate(heads_attns, axis=-1)
-        return proj_fwd(layer_params[-1], attn)
-    else:
-        return scaled_dot_prod_attn(qkv, mask)
+    num_heads = int((len(layer_params)-1)/3)
+    heads_attns = tlayer_attn_heads_fwd(layer_params[0], qkv, mask)
+    attn = jnp.concatenate(heads_attns, axis=-1)
+    return proj_fwd(layer_params[-1], attn)
 
 def tlayer_ffn_fwd(layer_params, x): # input: seq_len x emb_dim
     x = linear_fwd((layer_params[0], layer_params[1]), x)
@@ -133,7 +128,7 @@ def layernorm_fwd(layer_params, x):
     normalized_x = (x - x_mean) / x_std
     return jnp.multiply(x, layer_params[0][None, :]) + layer_params[1][None, :] # since both layer_params are output_dim x
 
-def tlayer_fwd(layer_params, y, mask, key, train=True): # input: seq_len x emb_dim
+def tlayer_fwd_aiayn(layer_params, y, mask, key, train=True): # input: seq_len x emb_dim
     keys = random.split(key, 2)
 
     y = y + dropout(tlayer_attn_fwd(layer_params[:-8], (y, y, y), mask), keys[0], train)
@@ -167,18 +162,18 @@ def pos_encodings(x, indices): # input: seq_len x emb_dim
     return jnp.stack((jnp.sin(pos_array), jnp.cos(pos_array)), axis=2).reshape(seq_len, emb_dim)
 
 # TODO: unify tlayer(s) with tlayer(s)_with_cross_attention, but that jit works correctly
-def tlayers_fwd(params, y, mask, indices, key, train=True): # input: seq_len x
+def tlayers_fwd_aiayn(params, y, mask, indices, key, train=True): # input: seq_len x
     key, dropout_key = random.split(key, 2)
     y = embed(params[0], y)
     y = dropout(y + pos_encodings(y, indices), dropout_key, train)
     
     for layer_params in params[1:]:
         key, tlayer_key = random.split(key, 2)
-        y = tlayer_fwd(layer_params, y, mask, tlayer_key, train)
+        y = tlayer_fwd_aiayn(layer_params, y, mask, tlayer_key, train)
 
     return y
 
-def tlayers_fwd_scanned(params, y, mask, key, train=True): # input: seq_len x
+def tlayers_fwd_aiayn_scanned(params, y, mask, key, train=True): # input: seq_len x
     key, dropout_key = random.split(key, 2)
     y = embed(params[0], y)
     y = dropout(y + pos_encodings(y), dropout_key, train)
@@ -221,8 +216,8 @@ def forward_aiayn(params, x, y, x_mask, y_mask, yx_mask, x_indices, y_indices, k
     layers = int((len(params) -1) /2)
     keys = random.split(key, 2)
     
-    x = tlayers_fwd(params[:layers+1], x, x_mask, x_indices, keys[0], train=train)
-    #x = tlayers_fwd_scanned(params[:2], x, x_mask, keys[0], train=train)
+    x = tlayers_fwd_aiayn(params[:layers+1], x, x_mask, x_indices, keys[0], train=train)
+    #x = tlayers_fwd_aiayn_scanned(params[:2], x, x_mask, keys[0], train=train)
     
     y = tlayers_with_cross_attn_fwd([params[0]] + params[layers+1:], y, y_mask, x, yx_mask, y_indices, keys[1], train=train)
     #y = tlayers_with_cross_attn_fwd_scanned([params[0], params[2]], y, y_mask, x, yx_mask, keys[1], train=train)
@@ -235,7 +230,7 @@ batched_forward_aiayn = vmap(forward_aiayn, in_axes=(None, 0, 0, 0, 0, 0, 0, 0, 
 def forward_gpt2like(params, y, y_mask, y_indices, key, train): # input: seq_len x
     keys = random.split(key, 2)
     
-    y = tlayers_fwd(params, y, y_mask, y_indices, keys[0], train=train)
+    y = tlayers_fwd_aiayn(params, y, y_mask, y_indices, keys[0], train=train)
     
     y = linear_fwd(params[0], y) 
     return y
