@@ -89,24 +89,26 @@ def linear_fwd(layer_params, x): # input: seq_len x emb_dim
 def proj_fwd(layer_params, x): # input: seq_len x emb_dim
     return jnp.matmul(x, jnp.transpose(layer_params)) # since layer_params is output_dim x emb_dim
 
-def scaled_dot_prod_attn(qkv, mask): # inputs: seq_len x emb_dim, mask: seq_len(q) x seq_len(k)
+def scaled_dot_prod_attn(qkv, mask, key, train=True): # inputs: seq_len x emb_dim, mask: seq_len(q) x seq_len(k)
     q, k, v = qkv
     attn = jnp.matmul(q, jnp.transpose(k)) # seq_len(q) x seq_len(k)
     attn = attn / jnp.sqrt(q.shape[-1]) # scale by sqrt(d_k)
     #attn = jnp.where(mask, attn, jnp.full_like(attn, -jnp.inf))
     attn = jnp.where(mask, attn, jnp.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
     softmaxed_attn = jnp.exp(log_softmax(attn))
+    softmaxed_attn = dropout(softmaxed_attn, key, train)
     return jnp.matmul(softmaxed_attn, v) # output: seq_len x emb_dim
 
-def tlayer_attn_head_fwd(layer_params, qkv, mask): # input: seq_len x emb_dim
+def tlayer_attn_head_fwd(layer_params, qkv, mask, key, train): # input: seq_len x emb_dim
     proj_qkv = tuple([proj_fwd(p, x) for p, x in zip(layer_params, qkv)]) #TODO: vmap? For cross attn, qkv are not of the same shape..
-    return scaled_dot_prod_attn(proj_qkv, mask)
+    return scaled_dot_prod_attn(proj_qkv, mask, key, train)
 
-tlayer_attn_heads_fwd = vmap(tlayer_attn_head_fwd, in_axes=(0, None, None))
+tlayer_attn_heads_fwd = vmap(tlayer_attn_head_fwd, in_axes=(0, None, None, 0, None))
 
-def tlayer_attn_fwd(layer_params, qkv, mask): # input: seq_len x emb_dim
-    num_heads = int((len(layer_params)-1)/3)
-    heads_attns = tlayer_attn_heads_fwd(layer_params[0], qkv, mask)
+def tlayer_attn_fwd(layer_params, qkv, mask, key, train): # input: seq_len x emb_dim
+    num_heads = layer_params[0].shape[0]
+    keys = random.split(key, num_heads)
+    heads_attns = tlayer_attn_heads_fwd(layer_params[0], qkv, mask, keys, train)
     attn = jnp.concatenate(heads_attns, axis=-1)
     return proj_fwd(layer_params[-1], attn)
 
@@ -131,10 +133,24 @@ def layernorm_fwd(layer_params, x):
 def tlayer_fwd_aiayn(layer_params, y, mask, key, train=True): # input: seq_len x emb_dim
     keys = random.split(key, 2)
 
-    y = y + dropout(tlayer_attn_fwd(layer_params[:-8], (y, y, y), mask), keys[0], train)
+    # TODO: Note that, unlike GPT2, AIAYN doesn't apply dropouts to attention weights.
+    # To achieve that, we set tlayer_attn_fwd's dropout layer in evaluation mode (thus passing 0 rnd key + train=false)
+    # This is somehow ugly. In future, when we have many attn mechanims, we should pass attn function instead..
+    y = y + dropout(tlayer_attn_fwd(layer_params[:-8], (y, y, y), mask, random.PRNGKey(0), False), keys[0], train)
     y = layernorm_fwd(layer_params[-8:-6], y)
 
     y = y + dropout(tlayer_ffn_fwd(layer_params[-6:-2], y), keys[1], train)
+    y = layernorm_fwd(layer_params[-2:], y)
+    return y
+
+def tlayer_fwd_gpt2like(layer_params, y, mask, key, train=True): # input: seq_len x emb_dim
+    keys = random.split(key, 3)
+
+    # Ugly way of overloading XXX
+    y = y + dropout(tlayer_attn_fwd(layer_params[:-8], (y, y, y), mask, keys[0], train), keys[1], train)
+    y = layernorm_fwd(layer_params[-8:-6], y)
+
+    y = y + dropout(tlayer_ffn_fwd(layer_params[-6:-2], y), keys[2], train)
     y = layernorm_fwd(layer_params[-2:], y)
     return y
 
@@ -170,6 +186,17 @@ def tlayers_fwd_aiayn(params, y, mask, indices, key, train=True): # input: seq_l
     for layer_params in params[1:]:
         key, tlayer_key = random.split(key, 2)
         y = tlayer_fwd_aiayn(layer_params, y, mask, tlayer_key, train)
+
+    return y
+
+def tlayers_fwd_gpt2like(params, y, mask, indices, key, train=True): # input: seq_len x
+    key, dropout_key = random.split(key, 2)
+    y = embed(params[0], y)
+    y = dropout(y + pos_encodings(y, indices), dropout_key, train)
+    
+    for layer_params in params[1:]:
+        key, tlayer_key = random.split(key, 2)
+        y = tlayer_fwd_gpt2like(layer_params, y, mask, tlayer_key, train)
 
     return y
 
