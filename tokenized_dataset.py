@@ -55,11 +55,21 @@ def load_tokenized_dataset_gpt2(split="train"):
     tokenizer_filename = "bpe_tokenizer_fineweb-edu_sample-10BT_100k_ds_merges_30k.pickle"
     print(f'Loading tokenizer {tokenizer_filename}')
     (tokenize, detokenize), state = load_bpe_tokenizer(f'tokenizers/{tokenizer_filename}')
-    def encode_batch_map_func(batch):
-        return {'y': [ toks for toks in tokenize(batch['y'])]}
+
+    # TODO: Build tokenizer from bigger dataset, so OOV words are not present
+    def filter_oov(item): # Note there is a faster way of coding this up..
+        for w in get_words(item['y']):
+            if not all([ch in state[0][0] for ch in w]):
+                return False
+        return True
+    print(f'HotFix: Filter out items containing out-of-vocabulary words')
+    ds = ds.filter(filter_oov)
+
     # Regarding batch_size below, the op is likely becoming memory-bound with bigger batch_size.
     # TODO: it would be worth investigating it, but I am skiping it in interest of time
     print(f'Tokenizing dataset')
+    def encode_batch_map_func(batch):
+        return {'y': [ toks for toks in tokenize(batch['y'])]}
     # TODO XXX: this sometimes hangs because of waiting for procs, should we reduce num_proc if loading from cache anyway?
     ds = ds.map(encode_batch_map_func, batched=True, num_proc=12, batch_size=50) 
     ds = ds.map(lambda item: {'x': []}, batched=False, num_proc=12) # mock x for compatibility
