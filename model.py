@@ -74,6 +74,7 @@ def init_transformer_gpt2like(vocab_size, emb_dim, layers, num_heads, ffn_dim, k
 ### MODEL
 
 def log_softmax(x_logits): # compute log_softmax from logits over the last dimension
+    # TODO XXX: shouldn't we subtract largest x_logits first in order to make op more stable?
     return x_logits - logsumexp(x_logits, axis=-1, keepdims=True)
 
 def embed(layer_params, x): # input: 1 x
