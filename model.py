@@ -83,6 +83,10 @@ def embed(layer_params, x): # input: 1 x
 def relu(x):
     return jnp.maximum(0, x)
 
+def gelu(x):
+    k = jnp.sqrt(2/jnp.pi)
+    return 0.5 * x * (1 + jnp.tanh(k * (x + 0.044715 * jnp.power(x,3))))
+
 def linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return jnp.matmul(x, jnp.transpose(layer_params[0])) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
 
@@ -112,9 +116,9 @@ def tlayer_attn_fwd(layer_params, qkv, mask, key, train): # input: seq_len x emb
     attn = jnp.concatenate(heads_attns, axis=-1)
     return proj_fwd(layer_params[-1], attn)
 
-def tlayer_ffn_fwd(layer_params, x): # input: seq_len x emb_dim
+def tlayer_ffn_fwd(layer_params, x, activation_fn): # input: seq_len x emb_dim
     x = linear_fwd((layer_params[0], layer_params[1]), x)
-    x = relu(x)
+    x = activation_fn(x)
     x = linear_fwd((layer_params[2], layer_params[3]), x)
     return x
 
@@ -139,7 +143,7 @@ def tlayer_fwd_aiayn(layer_params, y, mask, key, train=True): # input: seq_len x
     y = y + dropout(tlayer_attn_fwd(layer_params[:-8], (y, y, y), mask, random.PRNGKey(0), False), keys[0], train)
     y = layernorm_fwd(layer_params[-8:-6], y)
 
-    y = y + dropout(tlayer_ffn_fwd(layer_params[-6:-2], y), keys[1], train)
+    y = y + dropout(tlayer_ffn_fwd(layer_params[-6:-2], y, relu), keys[1], train)
     y = layernorm_fwd(layer_params[-2:], y)
     return y
 
@@ -150,7 +154,7 @@ def tlayer_fwd_gpt2like(layer_params, y, mask, key, train=True): # input: seq_le
     y = y + dropout(tlayer_attn_fwd(layer_params[:-8], (y, y, y), mask, keys[0], train), keys[1], train)
     y = layernorm_fwd(layer_params[-8:-6], y)
 
-    y = y + dropout(tlayer_ffn_fwd(layer_params[-6:-2], y), keys[2], train)
+    y = y + dropout(tlayer_ffn_fwd(layer_params[-6:-2], y, gelu), keys[2], train)
     y = layernorm_fwd(layer_params[-2:], y)
     return y
 
@@ -164,7 +168,7 @@ def tlayer_with_cross_attn_fwd(layer_params, y, mask, x, yx_mask, key, train=Tru
     y = y + dropout(tlayer_attn_fwd(layer_params[cross_attn_section:-8], (y, x, x), yx_mask), keys[1], train)
     y = layernorm_fwd(layer_params[-8:-6], y)
     
-    y = y + dropout(tlayer_ffn_fwd(layer_params[-6:-2], y), keys[2], train)
+    y = y + dropout(tlayer_ffn_fwd(layer_params[-6:-2], y, relu), keys[2], train)
     y = layernorm_fwd(layer_params[-2:], y)
     return y
 
