@@ -72,6 +72,7 @@ def load_tokenized_dataset_gpt2(split="train"):
         return {'y': [ toks for toks in tokenize(batch['y'])]}
     # TODO XXX: this sometimes hangs because of waiting for procs, should we reduce num_proc if loading from cache anyway?
     ds = ds.map(encode_batch_map_func, batched=True, num_proc=12, batch_size=50) 
+    ds = ds.filter(lambda item: len(item['y'])>0) # TODO XXX: HotFix for a bug in tokenizer
     ds = ds.map(lambda item: {'x': []}, batched=False, num_proc=12) # mock x for compatibility
     return ds, (tokenize, detokenize, len(state[0][0])) # dataset, tokenizer_state (..,.., vocab_len)
 

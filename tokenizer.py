@@ -238,8 +238,13 @@ def make_bpe_tokenizer_func(state):
         def bpe_tokenize_w(w):
             return [bpe_vocab_map[s] for s in w.split(" ")]
         def bpe_tokenize_str(bpe_str):
-            return [t for w in bpe_str for t in bpe_tokenize_w(w)]
-            
+            try: # TODO XXX: HotFix for a bug in tokenizer
+                return [t for w in bpe_str for t in bpe_tokenize_w(w)]
+            except KeyError:
+                print(f'KeyError for bpe_str')
+                return []
+
+        # TODO XXX: extract bpe_str (in its original form, not after applying merges) for which KeyError happens
         return [bpe_tokenize_str(bpe_str) for bpe_str in batched_bpe_str]
     
     def bpe_detokenize(reversed_bpe_vocab_map, toks):
