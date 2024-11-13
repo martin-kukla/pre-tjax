@@ -41,7 +41,7 @@ def init_tlayer(emb_dim, num_heads, ffn_dim, key, cross_attn=False):
         attns = attns + init_tlayer_attn(emb_dim, num_heads, keys[2]) + init_layernorm_layer(emb_dim, keys[3])
     return attns + init_tlayer_ffn(emb_dim, ffn_dim, keys[-2]) + init_layernorm_layer(emb_dim, keys[-1])
 
-def init_transformer(vocab_size, emb_dim, layers, num_heads, ffn_dim, key): 
+def init_transformer_aiayn(vocab_size, emb_dim, layers, num_heads, ffn_dim, key): 
     all_keys = random.split(key, 2 * layers + 1)
 
     encoder_params = [init_tlayer(emb_dim, num_heads, ffn_dim, k) for k in all_keys[1:1+layers]] 
