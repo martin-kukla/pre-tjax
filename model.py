@@ -60,12 +60,13 @@ def init_transformer(vocab_size, emb_dim, layers, num_heads, ffn_dim, key):
     params = [list(p) for p in params]        
     return params
 
-def init_transformer_gpt2like(vocab_size, emb_dim, layers, num_heads, ffn_dim, key):
-    all_keys = random.split(key, 1 + layers)
+def init_transformer_gpt2like(vocab_size, emb_dim, layers, num_heads, ffn_dim, seq_len, key):
+    all_keys = random.split(key, 2 + layers)
 
-    decoder_params = [init_tlayer(emb_dim, num_heads, ffn_dim, k) for k in all_keys[1:]]
+    decoder_params = [init_tlayer(emb_dim, num_heads, ffn_dim, k) for k in all_keys[2:]]
 
     params = ( [init_linear_layer(emb_dim, vocab_size, all_keys[0])] 
+    + [(init_proj_layer(emb_dim, seq_len, all_keys[1]), )] # learnable positional encodings
     + decoder_params)
 
     params = [list(p) for p in params]        
@@ -196,9 +197,9 @@ def tlayers_fwd_aiayn(params, y, mask, indices, key, train=True): # input: seq_l
 def tlayers_fwd_gpt2like(params, y, mask, indices, key, train=True): # input: seq_len x
     key, dropout_key = random.split(key, 2)
     y = embed(params[0], y)
-    y = dropout(y + pos_encodings(y, indices), dropout_key, train)
+    y = dropout(y + params[1][0], dropout_key, train)
     
-    for layer_params in params[1:]:
+    for layer_params in params[2:]:
         key, tlayer_key = random.split(key, 2)
         y = tlayer_fwd_gpt2like(layer_params, y, mask, tlayer_key, train)
 
