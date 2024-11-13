@@ -261,7 +261,7 @@ batched_forward_aiayn = vmap(forward_aiayn, in_axes=(None, 0, 0, 0, 0, 0, 0, 0, 
 def forward_gpt2like(params, y, y_mask, y_indices, key, train): # input: seq_len x
     keys = random.split(key, 2)
     
-    y = tlayers_fwd_aiayn(params, y, y_mask, y_indices, keys[0], train=train)
+    y = tlayers_fwd_gpt2like(params, y, y_mask, y_indices, keys[0], train=train)
     
     y = linear_fwd(params[0], y) 
     return y
