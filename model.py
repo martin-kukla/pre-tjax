@@ -24,11 +24,8 @@ def init_tlayer_attn_heads(emb_dim, num_heads, key, scale=1e-2):
     return scale * random.normal(key, (num_heads, 3, proj_dim, emb_dim)) # 3 for each of qkv
 
 def init_tlayer_attn(emb_dim, num_heads, key):
-    if num_heads>0:
-        keys = random.split(key, 2)
-        return (init_tlayer_attn_heads(emb_dim, num_heads, keys[0]), ) + (init_proj_layer(emb_dim, emb_dim, keys[1]),)
-    else:
-        return tuple() # TODO: head=0 means no projections, I leave this option for further investigation
+    keys = random.split(key, 2)
+    return (init_tlayer_attn_heads(emb_dim, num_heads, keys[0]), ) + (init_proj_layer(emb_dim, emb_dim, keys[1]),)
     
 def init_tlayer_ffn(emb_dim, ffn_dim, key):
     keys = random.split(key, 2)
