@@ -38,6 +38,11 @@ def init_tlayer(emb_dim, num_heads, ffn_dim, key, cross_attn=False):
         attns = attns + init_tlayer_attn(emb_dim, num_heads, keys[2]) + init_layernorm_layer(emb_dim, keys[3])
     return attns + init_tlayer_ffn(emb_dim, ffn_dim, keys[-2]) + init_layernorm_layer(emb_dim, keys[-1])
 
+def init_tlayer_gpt2(emb_dim, num_heads, ffn_dim, key):
+    keys = random.split(key, 4)
+    attns = init_layernorm_layer(emb_dim, keys[0]) + init_tlayer_attn(emb_dim, num_heads, keys[1]) 
+    return attns + init_layernorm_layer(emb_dim, keys[2]) + init_tlayer_ffn(emb_dim, ffn_dim, keys[3])
+
 def init_transformer_aiayn(vocab_size, emb_dim, layers, num_heads, ffn_dim, key): 
     all_keys = random.split(key, 2 * layers + 1)
 
@@ -58,13 +63,14 @@ def init_transformer_aiayn(vocab_size, emb_dim, layers, num_heads, ffn_dim, key)
     return params
 
 def init_transformer_gpt2like(vocab_size, emb_dim, layers, num_heads, ffn_dim, seq_len, key):
-    all_keys = random.split(key, 2 + layers)
+    all_keys = random.split(key, 3 + layers)
 
-    decoder_params = [init_tlayer(emb_dim, num_heads, ffn_dim, k) for k in all_keys[2:]]
+    decoder_params = [init_tlayer_gpt2(emb_dim, num_heads, ffn_dim, k) for k in all_keys[2:-1]]
 
     params = ( [init_linear_layer(emb_dim, vocab_size, all_keys[0])] 
     + [(init_proj_layer(emb_dim, seq_len, all_keys[1]), )] # learnable positional encodings
-    + decoder_params)
+    + decoder_params
+    + [init_layernorm_layer(emb_dim, all_keys[-1])])
 
     params = [list(p) for p in params]        
     return params
@@ -148,12 +154,11 @@ def tlayer_fwd_aiayn(layer_params, y, mask, key, train=True): # input: seq_len x
 def tlayer_fwd_gpt2like(layer_params, y, mask, key, train=True): # input: seq_len x emb_dim
     keys = random.split(key, 3)
 
-    # Ugly way of overloading XXX
-    y = y + dropout(tlayer_attn_fwd(layer_params[:-8], (y, y, y), mask, keys[0], train), keys[1], train)
-    y = layernorm_fwd(layer_params[-8:-6], y)
+    y_diff = layernorm_fwd(layer_params[:2], y)
+    y = y + dropout(tlayer_attn_fwd(layer_params[2:-6], (y_diff, y_diff, y_diff), mask, keys[0], train), keys[1], train)
 
-    y = y + dropout(tlayer_ffn_fwd(layer_params[-6:-2], y, gelu), keys[2], train)
-    y = layernorm_fwd(layer_params[-2:], y)
+    y_diff = layernorm_fwd(layer_params[-6:-4], y)
+    y = y + dropout(tlayer_ffn_fwd(layer_params[-4:], y_diff, gelu), keys[2], train)
     return y
 
 def tlayer_with_cross_attn_fwd(layer_params, y, mask, x, yx_mask, key, train=True): # input: seq_len x emb_dim
@@ -196,9 +201,10 @@ def tlayers_fwd_gpt2like(params, y, mask, indices, key, train=True): # input: se
     y = embed(params[0], y)
     y = dropout(y + params[1][0], dropout_key, train)
     
-    for layer_params in params[2:]:
+    for layer_params in params[2:-1]:
         key, tlayer_key = random.split(key, 2)
         y = tlayer_fwd_gpt2like(layer_params, y, mask, tlayer_key, train)
+    y = layernorm_fwd(params[-1], y)
 
     return y
 
