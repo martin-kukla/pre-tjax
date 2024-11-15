@@ -1,5 +1,6 @@
 ### PARAMS + MODEL
 DROPOUT_RATE = 0.1 # TODO: move it out, and pass as paramteter
+INIT_SCALE = 2e-2 # In my previous AIYAIN experiment, I used 0.1. TODO XXX:  setup up Xavier/Glorot for AIYAIN instead?
 
 import jax.numpy as jnp
 from jax import random, vmap
@@ -7,28 +8,26 @@ from jax.scipy.special import logsumexp
 
 ### PARAMS 
 
-def init_linear_layer(m, n, key, scale=1e-2): 
+def init_linear_layer(m, n, key, scale=INIT_SCALE): 
     return scale * random.normal(key, (n, m)), jnp.zeros((n,))
 
-def init_proj_layer(emb_dim, proj_dim, key, scale=1e-2):
+def init_proj_layer(emb_dim, proj_dim, key, scale=INIT_SCALE):
     return scale * random.normal(key, (proj_dim, emb_dim))
 
-def init_layernorm_layer(n, key, scale=1e-2): 
-    #w_key, b_key = random.split(key) 
-    #return scale * random.normal(w_key, (n, )), scale * random.normal(b_key, (n,))
+def init_layernorm_layer(n, key, scale=INIT_SCALE):
     return jnp.ones((n, )), jnp.zeros((n,))
 
-def init_tlayer_attn_heads(emb_dim, num_heads, key, scale=1e-2): 
+def init_tlayer_attn_heads(emb_dim, num_heads, key, scale=INIT_SCALE): 
     proj_dim = int(emb_dim / num_heads)
     return scale * random.normal(key, (num_heads, 3, proj_dim, emb_dim)) # 3 for each of qkv
 
-def init_tlayer_attn(emb_dim, num_heads, key):
+def init_tlayer_attn(emb_dim, num_heads, key, residual_scale=INIT_SCALE):
     keys = random.split(key, 2)
-    return (init_tlayer_attn_heads(emb_dim, num_heads, keys[0]), ) + (init_proj_layer(emb_dim, emb_dim, keys[1]),)
+    return (init_tlayer_attn_heads(emb_dim, num_heads, keys[0]), ) + (init_proj_layer(emb_dim, emb_dim, keys[1], residual_scale),)
     
-def init_tlayer_ffn(emb_dim, ffn_dim, key):
+def init_tlayer_ffn(emb_dim, ffn_dim, key, residual_scale=INIT_SCALE):
     keys = random.split(key, 2)
-    return init_linear_layer(emb_dim, ffn_dim, keys[0]) +  init_linear_layer(ffn_dim, emb_dim, keys[1]) 
+    return init_linear_layer(emb_dim, ffn_dim, keys[0]) +  init_linear_layer(ffn_dim, emb_dim, keys[1], residual_scale)
 
 def init_tlayer(emb_dim, num_heads, ffn_dim, key, cross_attn=False):
     keys = random.split(key, 6 if cross_attn else 4)
@@ -37,10 +36,11 @@ def init_tlayer(emb_dim, num_heads, ffn_dim, key, cross_attn=False):
         attns = attns + init_tlayer_attn(emb_dim, num_heads, keys[2]) + init_layernorm_layer(emb_dim, keys[3])
     return attns + init_tlayer_ffn(emb_dim, ffn_dim, keys[-2]) + init_layernorm_layer(emb_dim, keys[-1])
 
-def init_tlayer_gpt2(emb_dim, num_heads, ffn_dim, key):
+def init_tlayer_gpt2(emb_dim, num_heads, ffn_dim, key, nlayers):
     keys = random.split(key, 4)
-    attns = init_layernorm_layer(emb_dim, keys[0]) + init_tlayer_attn(emb_dim, num_heads, keys[1]) 
-    return attns + init_layernorm_layer(emb_dim, keys[2]) + init_tlayer_ffn(emb_dim, ffn_dim, keys[3])
+    residual_scale = INIT_SCALE/ jnp.sqrt(2*nlayers).item() # scaling of residual layers following the paper: there is some amgibuity which units should be affected..
+    attns = init_layernorm_layer(emb_dim, keys[0]) + init_tlayer_attn(emb_dim, num_heads, keys[1]) #, residual_scale = residual_scale) 
+    return attns + init_layernorm_layer(emb_dim, keys[2]) + init_tlayer_ffn(emb_dim, ffn_dim, keys[3]) #, residual_scale = residual_scale)
 
 def init_transformer_aiayn(vocab_size, emb_dim, layers, num_heads, ffn_dim, key): 
     all_keys = random.split(key, 2 * layers + 1)
@@ -64,7 +64,7 @@ def init_transformer_aiayn(vocab_size, emb_dim, layers, num_heads, ffn_dim, key)
 def init_transformer_gpt2like(vocab_size, emb_dim, layers, num_heads, ffn_dim, seq_len, key):
     all_keys = random.split(key, 3 + layers)
 
-    decoder_params = [init_tlayer_gpt2(emb_dim, num_heads, ffn_dim, k) for k in all_keys[2:-1]]
+    decoder_params = [init_tlayer_gpt2(emb_dim, num_heads, ffn_dim, k, layers) for k in all_keys[2:-1]]
 
     params = ( [init_linear_layer(emb_dim, vocab_size, all_keys[0])] 
     + [(init_proj_layer(emb_dim, seq_len, all_keys[1]), )] # learnable positional encodings
