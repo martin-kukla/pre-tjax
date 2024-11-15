@@ -10,10 +10,24 @@ import numpy as np
 ###
 def load_wmt14_dataset(streaming=False):
     # load dataset
-    print(f'Loading dataset')
+    print(f'Loading WMT14 dataset')
     ds = load_dataset("wmt14", "de-en", streaming=streaming, cache_dir="datasets/") # 5.4mln rows (set cache to permanent space)
     ds = ds.map(lambda item: {'x':item['translation']["en"], 'y':item['translation']["de"]}, remove_columns=["translation"], batched=False, num_proc=12)
 
+    return ds
+
+def load_fineweb_edu_dataset(split, streaming=False):
+    # load dataset
+    print(f'Loading FineWeb-Edu dataset')
+    ds = load_dataset("HuggingFaceFW/fineweb-edu", name="sample-10BT", split=split, streaming=streaming, cache_dir="datasets/") # sample-10BT: 9.67mln rows
+    ds = ds.map(lambda item: {'x':"", 'y':item['text']}, batched=False).select_columns(['x','y']) # mocks x for compatibility (effectively it will be ignored)
+    return ds
+
+def load_hellaswag_dataset():
+    # load dataset
+    print(f'Loading HellaSwag dataset')
+    ds = load_dataset("Rowan/hellaswag", split="validation", streaming=False, cache_dir="datasets/") # 10k rows
+    ds = ds.map(lambda item: {'x':item['endings'], 'y':item['ctx'], 'label': item['label']}, batched=False).select_columns(['x','y', 'label']) # overload x, add label
     return ds
     
 def load_tokenized_dataset():
@@ -33,6 +47,66 @@ def load_tokenized_dataset():
     # TODO XXX: this sometimes hangs because of waiting for procs, should we reduce num_proc if loading from cache anyway?
     ds = ds.map(encode_batch_map_func, batched=True, num_proc=12, batch_size=50) 
     return ds, (tokenize, detokenize, len(state[0][0])) # dataset, tokenizer_state (..,.., vocab_len)
+    
+def load_tokenized_dataset_gpt2(split="train"):
+    ds = load_fineweb_edu_dataset(split)
+    
+    # Load tokenizer + map
+    tokenizer_filename = "bpe_tokenizer_fineweb-edu_sample-10BT_100k_ds_merges_30k.pickle"
+    print(f'Loading tokenizer {tokenizer_filename}')
+    (tokenize, detokenize), state = load_bpe_tokenizer(f'tokenizers/{tokenizer_filename}')
+
+    # TODO: Build tokenizer from bigger dataset, so OOV words are not present
+    def filter_oov(item): # Note there is a faster way of coding this up..
+        for w in get_words(item['y']):
+            if not all([ch in state[0][0] for ch in w]):
+                return False
+        return True
+    print(f'HotFix: Filter out items containing out-of-vocabulary words')
+    ds = ds.filter(filter_oov)
+
+    # Regarding batch_size below, the op is likely becoming memory-bound with bigger batch_size.
+    # TODO: it would be worth investigating it, but I am skiping it in interest of time
+    print(f'Tokenizing dataset')
+    def encode_batch_map_func(batch):
+        return {'y': [ toks for toks in tokenize(batch['y'])]}
+    # TODO XXX: this sometimes hangs because of waiting for procs, should we reduce num_proc if loading from cache anyway?
+    ds = ds.map(encode_batch_map_func, batched=True, num_proc=12, batch_size=50) 
+    ds = ds.filter(lambda item: len(item['y'])>0) # TODO XXX: HotFix for a bug in tokenizer
+    ds = ds.map(lambda item: {'x': []}, batched=False, num_proc=12) # mock x for compatibility
+    return ds, (tokenize, detokenize, len(state[0][0])) # dataset, tokenizer_state (..,.., vocab_len)
+
+def unpack_hellaswag_x(item_x):
+    choices = []
+    while 0 in item_x:
+        ind=item_x.index(0)
+        choices.append(item_x[:ind])
+        item_x = item_x[ind+1:]
+    assert len(item_x)==1
+    return choices, item_x[0]-1 # note shifting label by one, as we don't want to overload "0" token
+    
+def load_tokenized_dataset_hellaswag(tokenize):
+    ds = load_hellaswag_dataset()
+    
+    # tokenize
+
+    # flatten tokenized choices + label with padding token in between: 
+    def pack_choices_in_x(choices, label): 
+        toks_list = [toks for toks in tokenize(choices)]
+        res = []
+        for toks in toks_list+[[int(label)+1]]: # note shifting label by 1, so we don't overload "0" token #TODO: rewrite the loop nicely "0.join"
+            res.extend(toks)
+            res.append(0)
+        return res[:-1]     
+    def encode(batch):
+        flattened_x_toks = [pack_choices_in_x(choices, label) for choices, label in zip(batch['x'], batch['label'])]
+        return {'x':flattened_x_toks, 'y': [ toks for toks in tokenize(batch['y'])]}
+    # Regarding batch_size below, the op is likely becoming memory-bound with bigger batch_size.
+    # TODO: it would be worth investigating it, but I am skiping it in interest of time
+    print(f'Tokenizing dataset')
+    # TODO XXX: this sometimes hangs because of waiting for procs, should we reduce num_proc if loading from cache anyway?
+    ds = ds.map(encode, batched=True, num_proc=12, batch_size=50).select_columns(['x','y'])
+    return ds
 
 
 ###
@@ -122,7 +196,8 @@ def convert_batch_item(x, y, seq_len, x_lens=None, y_lens=None):
     return (x, y_plus_one, x_mask, y_mask, yx_mask, x_indices, y_indices)
                 
 def get_batched_examples(ds, batch_size, seq_len, start_tok, end_tok, split="train", skip_n_rows=None):
-    ds_split = ds[split].skip(skip_n_rows) if skip_n_rows is not None else ds[split]    
+    ds_split = ds[split] if split is not None else ds
+    ds_split = ds_split.skip(skip_n_rows) if skip_n_rows is not None else ds_split    
 
     batch = []
     for item in ds_split:

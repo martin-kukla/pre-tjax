@@ -18,6 +18,7 @@ tensorboard --port=6006 --host=0.0.0.0 --path_prefix=/tb --logdir /lego/storage/
 git config --global user.email "martin.kukla@cantab.net"
 git config --global user.name "Martin Kukla"
 git config --global credential.helper store # This is not secure...
+git config --global --add safe.directory /efs/notebooks/mkukla/pre-tjax
 
 pip install wandb
 wandb login
