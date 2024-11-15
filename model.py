@@ -8,10 +8,9 @@ from jax.scipy.special import logsumexp
 ### PARAMS 
 
 def init_linear_layer(m, n, key, scale=1e-2): 
-    w_key, b_key = random.split(key) 
-    return scale * random.normal(w_key, (n, m)), scale * random.normal(b_key, (n,))
+    return scale * random.normal(key, (n, m)), jnp.zeros((n,))
 
-def init_proj_layer(emb_dim, proj_dim, key, scale=1e-2): 
+def init_proj_layer(emb_dim, proj_dim, key, scale=1e-2):
     return scale * random.normal(key, (proj_dim, emb_dim))
 
 def init_layernorm_layer(n, key, scale=1e-2): 
