@@ -61,7 +61,7 @@ def init_transformer_aiayn(vocab_size, emb_dim, layers, num_heads, ffn_dim, key)
     params = [list(p) for p in params]        
     return params
 
-def init_transformer_gpt2like(vocab_size, emb_dim, layers, num_heads, ffn_dim, seq_len, key):
+def init_transformer_gpt2(vocab_size, emb_dim, layers, num_heads, ffn_dim, seq_len, key):
     all_keys = random.split(key, 3 + layers)
 
     decoder_params = [init_tlayer_gpt2(emb_dim, num_heads, ffn_dim, k, layers) for k in all_keys[2:-1]]
@@ -150,7 +150,7 @@ def tlayer_fwd_aiayn(layer_params, y, mask, key, train=True): # input: seq_len x
     y = layernorm_fwd(layer_params[-2:], y)
     return y
 
-def tlayer_fwd_gpt2like(layer_params, y, mask, key, train=True): # input: seq_len x emb_dim
+def tlayer_fwd_gpt2(layer_params, y, mask, key, train=True): # input: seq_len x emb_dim
     keys = random.split(key, 3)
 
     y_diff = layernorm_fwd(layer_params[:2], y)
@@ -195,14 +195,14 @@ def tlayers_fwd_aiayn(params, y, mask, indices, key, train=True): # input: seq_l
 
     return y
 
-def tlayers_fwd_gpt2like(params, y, mask, indices, key, train=True): # input: seq_len x
+def tlayers_fwd_gpt2(params, y, mask, indices, key, train=True): # input: seq_len x
     key, dropout_key = random.split(key, 2)
     y = embed(params[0], y)
     y = dropout(y + params[1][0], dropout_key, train)
     
     for layer_params in params[2:-1]:
         key, tlayer_key = random.split(key, 2)
-        y = tlayer_fwd_gpt2like(layer_params, y, mask, tlayer_key, train)
+        y = tlayer_fwd_gpt2(layer_params, y, mask, tlayer_key, train)
     y = layernorm_fwd(params[-1], y)
 
     return y
@@ -261,12 +261,12 @@ def forward_aiayn(params, x, y, x_mask, y_mask, yx_mask, x_indices, y_indices, k
 #batched_forward = jit(vmap(forward_aiyan, in_axes=(None, 0, 0, None, None)), static_argnames=['train'])
 batched_forward_aiayn = vmap(forward_aiayn, in_axes=(None, 0, 0, 0, 0, 0, 0, 0, None, None))
 
-def forward_gpt2like(params, y, y_mask, y_indices, key, train): # input: seq_len x
+def forward_gpt2(params, y, y_mask, y_indices, key, train): # input: seq_len x
     keys = random.split(key, 2)
     
-    y = tlayers_fwd_gpt2like(params, y, y_mask, y_indices, keys[0], train=train)
+    y = tlayers_fwd_gpt2(params, y, y_mask, y_indices, keys[0], train=train)
     
     y = linear_fwd(params[0], y) 
     return y
 
-batched_forward_gpt2like = vmap(forward_gpt2like, in_axes=(None, 0, 0, 0, None, None))
+batched_forward_gpt2 = vmap(forward_gpt2, in_axes=(None, 0, 0, 0, None, None))
