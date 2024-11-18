@@ -75,15 +75,6 @@ def load_tokenized_dataset_gpt2(split="train"):
     ds = ds.filter(lambda item: len(item['y'])>0) # TODO XXX: HotFix for a bug in tokenizer
     ds = ds.map(lambda item: {'x': []}, batched=False, num_proc=12) # mock x for compatibility
     return ds, (tokenize, detokenize, len(state[0][0])) # dataset, tokenizer_state (..,.., vocab_len)
-
-def unpack_hellaswag_x(item_x):
-    choices = []
-    while 0 in item_x:
-        ind=item_x.index(0)
-        choices.append(item_x[:ind])
-        item_x = item_x[ind+1:]
-    assert len(item_x)==1
-    return choices, item_x[0]-1 # note shifting label by one, as we don't want to overload "0" token
     
 def load_tokenized_dataset_hellaswag(tokenize):
     ds = load_hellaswag_dataset()
@@ -240,3 +231,49 @@ def get_batched_examples_packed(ds, batch_size, seq_len, start_tok, end_tok, pac
     # TODO: the block below will be never called
     if split!="train" and len(batch) > 0: # Note I don't use last few rows left in train split..
         yield pack_batch(complete_last_batch(batch, batch_size, seq_len))
+
+
+
+
+###
+# Utils for HellaSwag
+###
+
+def unpack_hellaswag_x(item_x):
+    choices = []
+    while 0 in item_x:
+        ind=item_x.index(0)
+        choices.append(item_x[:ind])
+        item_x = item_x[ind+1:]
+    assert len(item_x)==1
+    return choices, item_x[0]-1 # note shifting label by one, as we don't want to overload "0" token
+
+# TODO XXX XXX: This is not efficient. As minimum, we could do it in parallel on CPU. We can also move the whole op
+# (i.e. unpacking, and copying individual choices to y) onto GPU: if so, data loader& data collator, need nested list
+# for x, in which each choice is of equal shape. Then, I believe we can concatenate y with choice in batches efficiently
+# we need different structure of batched_x coming from data collator: individual choices should be of equal shapes:
+# I assume existance of scatter like function, but operating on contigious blocks instead of individual values.
+# Finally we need batched computes of value function itself..
+def unpack_hellaswag_batched_x(batched_x: np.ndarray):
+    choices = []
+    labels = []
+    for item_x in batched_x:
+        item_choices, item_label = unpack_hellaswag_x(list(np.trim_zeros(item_x)))
+        choices.append(item_choices)
+        labels.append(item_label)
+    return list(map(list, zip(*choices))), labels
+
+def concatenate_hellaswag_y_and_choice(batched_y: np.ndarray, batched_choice: np.ndarray):
+    y_and_choice = np.copy(batched_y)
+    y_and_choice_mask = [] 
+    full_mask = np.tri(batched_y.shape[1]-1)
+    for y, choice in zip(y_and_choice, batched_choice):
+        choice = choice +[END_TOK]
+        zeros = np.where(y == END_TOK)[0]
+        assert len(zeros)>0
+        assert zeros[0]+len(choice) < len(y)
+        y[zeros[0]:zeros[0]+len(choice)]= choice
+        y_pad_mask = np.where(y[1:] != 0, np.ones((y[1:].shape[0])), 0) #  TODO XXX: is it behaving correctly if START_TOK&END_TOK present
+        y_mask = np.multiply(np.multiply(full_mask, y_pad_mask), y_pad_mask[:, None])
+        y_and_choice_mask.append(y_mask)
+    return y_and_choice, np.array(y_and_choice_mask)
