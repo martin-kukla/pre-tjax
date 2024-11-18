@@ -263,13 +263,13 @@ def unpack_hellaswag_batched_x(batched_x: np.ndarray):
         labels.append(item_label)
     return list(map(list, zip(*choices))), labels
 
-def concatenate_hellaswag_y_and_choice(batched_y: np.ndarray, batched_choice: np.ndarray):
+def concatenate_hellaswag_y_and_choice(batched_y: np.ndarray, batched_choice: np.ndarray, end_tok):
     y_and_choice = np.copy(batched_y)
     y_and_choice_mask = [] 
     full_mask = np.tri(batched_y.shape[1]-1)
     for y, choice in zip(y_and_choice, batched_choice):
-        choice = choice +[END_TOK]
-        zeros = np.where(y == END_TOK)[0]
+        choice = choice +[end_tok]
+        zeros = np.where(y == end_tok)[0]
         assert len(zeros)>0
         assert zeros[0]+len(choice) < len(y)
         y[zeros[0]:zeros[0]+len(choice)]= choice
