@@ -40,8 +40,8 @@ def init_tlayer(emb_dim, num_heads, ffn_dim, key, cross_attn=False):
 def init_tlayer_gpt2(emb_dim, num_heads, ffn_dim, key, nlayers):
     keys = random.split(key, 4)
     residual_scale = INIT_SCALE/ jnp.sqrt(2*nlayers).item() # scaling of residual layers following the paper: there is some amgibuity which units should be affected..
-    attns = init_layernorm_layer(emb_dim, keys[0]) + init_tlayer_attn(emb_dim, num_heads, keys[1]) #, residual_scale = residual_scale) 
-    return attns + init_layernorm_layer(emb_dim, keys[2]) + init_tlayer_ffn(emb_dim, ffn_dim, keys[3]) #, residual_scale = residual_scale)
+    attns = init_layernorm_layer(emb_dim, keys[0]) + init_tlayer_attn(emb_dim, num_heads, keys[1], residual_scale = residual_scale) 
+    return attns + init_layernorm_layer(emb_dim, keys[2]) + init_tlayer_ffn(emb_dim, ffn_dim, keys[3], residual_scale = residual_scale)
 
 def init_transformer_aiayn(vocab_size, emb_dim, layers, num_heads, ffn_dim, key): 
     all_keys = random.split(key, 2 * layers + 1)
