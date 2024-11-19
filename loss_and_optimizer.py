@@ -92,8 +92,8 @@ def sgd(params, grads, lr):
     return elwise((params, grads), lambda p,g: p - lr * g)
 
 
-def init_adam_w(params):
-    return [elwise((params,), lambda p: jnp.zeros_like(p)) for _ in range(2)]
+def init_adam_w(params): # initializes grads and moments estimates
+    return jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), params), [elwise((params,), lambda p: jnp.zeros_like(p)) for _ in range(2)]
 
 @jit
 def adam_w(params, grads, lr, betas, epsilon, moments, i, weight_decay=0.0): #TODO: add implemntation of weight_decay_mask?
