@@ -2,6 +2,7 @@
 DROPOUT_RATE = 0.1 # TODO: move it out, and pass as paramteter
 INIT_SCALE = 2e-2 # In my previous AIYAIN experiment, I used 0.1. TODO XXX:  setup up Xavier/Glorot for AIYAIN instead?
 
+import jax
 import jax.numpy as jnp
 from jax import random, vmap
 from jax.scipy.special import logsumexp
@@ -73,6 +74,9 @@ def init_transformer_gpt2(vocab_size, emb_dim, layers, num_heads, ffn_dim, seq_l
 
     params = [list(p) for p in params]        
     return params
+
+def count_num_params(params):
+    return sum([jnp.size(p_leaf) for p_leaf in jax.tree_util.tree_leaves(params)])
 
 ### MODEL
 

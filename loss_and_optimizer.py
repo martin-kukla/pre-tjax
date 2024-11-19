@@ -2,12 +2,13 @@
 # Loss + grads
 ###
 
-import jax
 from functools import partial
+import math
+import jax
 import jax.numpy as jnp
-from model import log_softmax, batched_forward_gpt2 # TODO XXX XXX: pass forward fn as parameter to relevant functions instead!
 from jax import grad, jit, lax 
 from jax import random
+from model import log_softmax, batched_forward_gpt2 # TODO XXX XXX: pass forward fn as parameter to relevant functions instead!
 
 def avg_cross_entropy_loss(y_labels, x_logits): # y_labels: batch_len x seq_len, x_logits: batch_len x seq_len x vocab_size
     # Note that in jax, un-jitted reshape calls are producing copies of array instead of views.
@@ -146,3 +147,11 @@ def adam_w_in_place(params, grads, lr, betas, epsilon, moments, i, weight_decay=
 #assert params[0][0].unsafe_buffer_pointer() == original_pointer # will not fail
 #params, moments = adam_w(params, grads, lr, betas, epsilon, moments, i)
 #assert params[0][0].unsafe_buffer_pointer() == original_pointer # will fail
+
+#@jit # TODO: I can't jit that one
+def _g_l2norm_squared(g_list):
+    return pow(jnp.linalg.norm(g_list),2)
+def grads_l2norm(grads): # computing l2norm without any memory copies
+    return math.sqrt(sum([ sum([_g_l2norm_squared(g) for g in g_items]) for g_items in grads]))
+def grads_grps_l2norms(grads):
+    return [ math.sqrt(sum([_g_l2norm_squared(g) for g in g_items])) for g_items in grads]
