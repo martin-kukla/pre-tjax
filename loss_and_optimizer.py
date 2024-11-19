@@ -91,6 +91,10 @@ def elwise(params_and_grads, func): # generically applying func element-wise
 def sgd(params, grads, lr):
     return elwise((params, grads), lambda p,g: p - lr * g)
 
+
+def init_adam_w(params):
+    return [elwise((params,), lambda p: jnp.zeros_like(p)) for _ in range(2)]
+
 @jit
 def adam_w(params, grads, lr, betas, epsilon, moments, i, weight_decay=0.0): #TODO: add implemntation of weight_decay_mask?
     t = i + 1 # TODO: should we decuple iteration from t, and threading t instead?
@@ -98,3 +102,37 @@ def adam_w(params, grads, lr, betas, epsilon, moments, i, weight_decay=0.0): #TO
     bias_corrected_moments = [elwise((moment,), lambda m: m / (1 - pow(b,t))) for b, moment in zip(betas, moments)]
     params = elwise((params, *bias_corrected_moments), lambda p,m,v: p - lr *(m / (jnp.sqrt(v) + epsilon) + weight_decay * p))
     return params, moments
+
+from functools import partial
+@partial(jax.jit, donate_argnames=("params","moments"), static_argnames=["weight_decay_mask"])
+def adam_w_in_place(params, grads, lr, betas, epsilon, moments, i, weight_decay=0.0, weight_decay_mask=None):
+    t = i + 1 # TODO: should we decuple iteration from t, and threading t instead?
+
+    # TODO: once write it more effiently, combine both loops + vmap (if possible)?
+    
+    # update moments
+    for b, moment, pow_g in zip(betas, moments, [1,2]): 
+        for grp_i in range(len(grads)):
+            for p_i in range(len(grads[grp_i])):
+                moment[grp_i][p_i] = moment[grp_i][p_i].at[:].multiply(b)
+                moment[grp_i][p_i] = moment[grp_i][p_i].at[:].add((1-b) * pow(grads[grp_i][p_i], pow_g))
+
+    # update grads
+    for grp_i in range(len(grads)):
+        for p_i in range(len(grads[grp_i])):
+            bias_correct_func = lambda b, m: m / (1 - pow(b,t))
+            m = bias_correct_func(betas[0], moments[0][grp_i][p_i])
+            v = bias_correct_func(betas[1], moments[1][grp_i][p_i])
+            item_weight_decay = weight_decay if (weight_decay_mask is None or weight_decay_mask[grp_i][p_i]) else 0.0
+            #item_weight_decay = weight_decay if weight_decay_mask[grp_i][p_i] else 0.0
+            #print(f'Shape {grp_i}, {p_i}: {params[grp_i][p_i].shape} {item_weight_decay}')
+            params[grp_i][p_i] =  params[grp_i][p_i].at[:].add(-lr * (m / (jnp.sqrt(v) + epsilon) + item_weight_decay * params[grp_i][p_i])) # TODO XXX: Test
+            
+    return params, moments
+
+# Testing Adam in place:
+#original_pointer = params[0][0].unsafe_buffer_pointer()
+#params, moments = adam_w_in_place(params, grads, lr, betas, epsilon, moments, i)
+#assert params[0][0].unsafe_buffer_pointer() == original_pointer # will not fail
+#params, moments = adam_w(params, grads, lr, betas, epsilon, moments, i)
+#assert params[0][0].unsafe_buffer_pointer() == original_pointer # will fail
