@@ -78,3 +78,23 @@ def log_probs(params, y, y_mask, y_indices):  # inputs: batch_size x seq_len
     # TODO: write it without copying memory? is it possible? 
     logits = batched_forward_gpt2(params, y_in, y_mask, y_indices, random.PRNGKey(0), False) 
     return compute_log_probs(y_out, logits)
+
+
+### 
+# Optimizers
+###
+
+# TODO: any call to this function can be replaced by jax's tree_map
+def elwise(params_and_grads, func): # generically applying func element-wise
+    return [ [ func(*p_and_g) for p_and_g in zip(*p_and_g_items)] for p_and_g_items in zip(*params_and_grads)]
+
+def sgd(params, grads, lr):
+    return elwise((params, grads), lambda p,g: p - lr * g)
+
+@jit
+def adam_w(params, grads, lr, betas, epsilon, moments, i, weight_decay=0.0): #TODO: add implemntation of weight_decay_mask?
+    t = i + 1 # TODO: should we decuple iteration from t, and threading t instead?
+    moments = [elwise((moment, grads), lambda m, g: b*m + (1-b) * pow(g, pow_g)) for b, moment, pow_g in zip(betas, moments, [1,2])]
+    bias_corrected_moments = [elwise((moment,), lambda m: m / (1 - pow(b,t))) for b, moment in zip(betas, moments)]
+    params = elwise((params, *bias_corrected_moments), lambda p,m,v: p - lr *(m / (jnp.sqrt(v) + epsilon) + weight_decay * p))
+    return params, moments
