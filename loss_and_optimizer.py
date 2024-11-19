@@ -79,6 +79,16 @@ def log_probs(params, y, y_mask, y_indices):  # inputs: batch_size x seq_len
     logits = batched_forward_gpt2(params, y_in, y_mask, y_indices, random.PRNGKey(0), False) 
     return compute_log_probs(y_out, logits)
 
+# Accumulates gradients in place
+@partial(jax.jit, donate_argnames=("acc_grads"))
+def acc_grad_loss(acc_grads, params, y, y_mask, y_indices, key_iter):
+    i_step_grads, grad_loss_rest = grad_loss(params, y, y_mask, y_indices, key_iter)
+    
+    for grp_i in range(len(acc_grads)):
+        for p_i in range(len(acc_grads[grp_i])):
+            acc_grads[grp_i][p_i] =  acc_grads[grp_i][p_i].at[:].add(i_step_grads[grp_i][p_i])
+            
+    return acc_grads, grad_loss_rest
 
 ### 
 # Optimizers
