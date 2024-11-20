@@ -78,30 +78,31 @@ grad_loss = grad(loss_train, has_aux=True) # TODO XXX: we jitted for JAX, but wa
 #     return compute_log_probs(y_out, logits)
 
 # # Accumulates gradients in place
-# @partial(jax.jit, donate_argnames=("acc_grads"))
-# def acc_grad_loss(acc_grads, params, y, y_mask, y_indices, key_iter):
-#     i_step_grads, grad_loss_rest = grad_loss(params, y, y_mask, y_indices, key_iter)
+# @partial(jax.jit, donate_argnames=("acc_grads")) # TODO XXX: use torch.compile here. TODO XXX: What about in_place operations??
+def acc_grad_loss(acc_grads, params, y, y_mask, y_indices):
+    i_step_grads, grad_loss_rest = grad_loss(params, y, y_mask, y_indices)
     
-#     for grp_i in range(len(acc_grads)):
-#         for p_i in range(len(acc_grads[grp_i])):
-#             acc_grads[grp_i][p_i] =  acc_grads[grp_i][p_i].at[:].add(i_step_grads[grp_i][p_i])
+    for grp_i in range(len(acc_grads)):
+        for p_i in range(len(acc_grads[grp_i])):
+            acc_grads[grp_i][p_i] =  acc_grads[grp_i][p_i] + i_step_grads[grp_i][p_i]
+            #acc_grads[grp_i][p_i] =  acc_grads[grp_i][p_i].at[:].add(i_step_grads[grp_i][p_i])
             
-#     return acc_grads, grad_loss_rest
+    return acc_grads, grad_loss_rest
 
 # ## 
 # Optimizers
 # ##
 
 # TODO: any call to this function can be replaced by jax's tree_map
-# def elwise(params_and_grads, func): # generically applying func element-wise
-#     return [ [ func(*p_and_g) for p_and_g in zip(*p_and_g_items)] for p_and_g_items in zip(*params_and_grads)]
+def elwise(params_and_grads, func): # generically applying func element-wise
+    return [ [ func(*p_and_g) for p_and_g in zip(*p_and_g_items)] for p_and_g_items in zip(*params_and_grads)]
 
-# def sgd(params, grads, lr):
-#     return elwise((params, grads), lambda p,g: p - lr * g)
+def sgd(params, grads, lr):
+    return elwise((params, grads), lambda p,g: p - lr * g)
 
 
-# def init_adam_w(params): # initializes grads and moments estimates
-#     return jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), params), [elwise((params,), lambda p: jnp.zeros_like(p)) for _ in range(2)]
+def init_adam_w(params): # initializes grads and moments estimates
+    return elwise((params,), lambda p: torch.zeros_like(p, device="cuda")), [elwise((params,), lambda p: torch.zeros_like(p, device="cuda")) for _ in range(2)]
 
 # @jit
 # def adam_w(params, grads, lr, betas, epsilon, moments, i, weight_decay=0.0): #TODO: add implemntation of weight_decay_mask?
@@ -112,31 +113,33 @@ grad_loss = grad(loss_train, has_aux=True) # TODO XXX: we jitted for JAX, but wa
 #     return params, moments
 
 # from functools import partial
-# @partial(jax.jit, donate_argnames=("params","moments"), static_argnames=["weight_decay_mask"])
-# def adam_w_in_place(params, grads, lr, betas, epsilon, moments, i, weight_decay=0.0, weight_decay_mask=None):
-#     t = i + 1 # TODO: should we decuple iteration from t, and threading t instead?
+# @partial(jax.jit, donate_argnames=("params","moments"), static_argnames=["weight_decay_mask"]) # TODO XXX: ADD torch.compile, how to achieve in-place operations (see below)?
+def adam_w_in_place(params, grads, lr, betas, epsilon, moments, i, weight_decay=0.0, weight_decay_mask=None):
+    t = i + 1 # TODO: should we decuple iteration from t, and threading t instead?
 
-#     # TODO: once write it more effiently, combine both loops + vmap (if possible)?
+    # TODO: once write it more effiently, combine both loops + vmap (if possible)?
     
-#     # update moments
-#     for b, moment, pow_g in zip(betas, moments, [1,2]): 
-#         for grp_i in range(len(grads)):
-#             for p_i in range(len(grads[grp_i])):
-#                 moment[grp_i][p_i] = moment[grp_i][p_i].at[:].multiply(b)
-#                 moment[grp_i][p_i] = moment[grp_i][p_i].at[:].add((1-b) * pow(grads[grp_i][p_i], pow_g))
+    # update moments
+    for b, moment, pow_g in zip(betas, moments, [1,2]): 
+        for grp_i in range(len(grads)):
+            for p_i in range(len(grads[grp_i])):
+                #moment[grp_i][p_i] = moment[grp_i][p_i].at[:].multiply(b)
+                #moment[grp_i][p_i] = moment[grp_i][p_i].at[:].add((1-b) * pow(grads[grp_i][p_i], pow_g))
+                moment[grp_i][p_i] = moment[grp_i][p_i] * b + (1-b) * pow(grads[grp_i][p_i], pow_g)
 
-#     # update grads
-#     for grp_i in range(len(grads)):
-#         for p_i in range(len(grads[grp_i])):
-#             bias_correct_func = lambda b, m: m / (1 - pow(b,t))
-#             m = bias_correct_func(betas[0], moments[0][grp_i][p_i])
-#             v = bias_correct_func(betas[1], moments[1][grp_i][p_i])
-#             item_weight_decay = weight_decay if (weight_decay_mask is None or weight_decay_mask[grp_i][p_i]) else 0.0
-#             #item_weight_decay = weight_decay if weight_decay_mask[grp_i][p_i] else 0.0
-#             #print(f'Shape {grp_i}, {p_i}: {params[grp_i][p_i].shape} {item_weight_decay}')
-#             params[grp_i][p_i] =  params[grp_i][p_i].at[:].add(-lr * (m / (jnp.sqrt(v) + epsilon) + item_weight_decay * params[grp_i][p_i])) # TODO XXX: Test
+    # update grads
+    for grp_i in range(len(grads)):
+        for p_i in range(len(grads[grp_i])):
+            bias_correct_func = lambda b, m: m / (1 - pow(b,t))
+            m = bias_correct_func(betas[0], moments[0][grp_i][p_i])
+            v = bias_correct_func(betas[1], moments[1][grp_i][p_i])
+            item_weight_decay = weight_decay if (weight_decay_mask is None or weight_decay_mask[grp_i][p_i]) else 0.0
+            #item_weight_decay = weight_decay if weight_decay_mask[grp_i][p_i] else 0.0
+            #print(f'Shape {grp_i}, {p_i}: {params[grp_i][p_i].shape} {item_weight_decay}')
+            #params[grp_i][p_i] =  params[grp_i][p_i].at[:].add(-lr * (m / (jnp.sqrt(v) + epsilon) + item_weight_decay * params[grp_i][p_i]))
+            params[grp_i][p_i] =  params[grp_i][p_i] + (-lr * (m / (torch.sqrt(v) + epsilon) + item_weight_decay * params[grp_i][p_i]))
             
-#     return params, moments
+    return params, moments
 
 # # Testing Adam in place:
 # # original_pointer = params[0][0].unsafe_buffer_pointer()
@@ -146,9 +149,9 @@ grad_loss = grad(loss_train, has_aux=True) # TODO XXX: we jitted for JAX, but wa
 # # assert params[0][0].unsafe_buffer_pointer() == original_pointer # will fail
 
 # #@jit # TODO: I can't jit that one
-# def _g_l2norm_squared(g_list):
-#     return pow(jnp.linalg.norm(g_list),2)
-# def grads_l2norm(grads): # computing l2norm without any memory copies
-#     return math.sqrt(sum([ sum([_g_l2norm_squared(g) for g in g_items]) for g_items in grads]))
-# def grads_grps_l2norms(grads):
-#     return [ math.sqrt(sum([_g_l2norm_squared(g) for g in g_items])) for g_items in grads]
+def _g_l2norm_squared(g_list):
+    return pow(torch.linalg.norm(g_list),2)
+def grads_l2norm(grads): # computing l2norm without any memory copies
+    return math.sqrt(sum([ sum([_g_l2norm_squared(g) for g in g_items]) for g_items in grads]))
+def grads_grps_l2norms(grads):
+    return [ math.sqrt(sum([_g_l2norm_squared(g) for g in g_items])) for g_items in grads]
