@@ -45,10 +45,8 @@ def count_num_params(params):
 
 ### MODEL
 
-# TODO XXX: PyTorch has recently enabled using some very fast implementation of matmul - check it out!
-
 def log_softmax(x_logits): # compute log_softmax from logits over the last dimension
-    x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)
+    x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0] # as it returns (maxs, indices)
     return x_logits - torch.logsumexp(x_logits, axis=-1, keepdims=True)
 
 def embed(layer_params, x): # input: 1 x
@@ -59,7 +57,7 @@ def relu(x):
 
 def gelu(x):
     k = math.sqrt(2/math.pi)
-    return 0.5 * x * (1 + torch.tanh(k * (x + 0.044715 * torch.power(x,3))))
+    return 0.5 * x * (1 + torch.tanh(k * (x + 0.044715 * torch.pow(x,3))))
 
 def linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
@@ -81,12 +79,12 @@ def tlayer_attn_head_fwd(layer_params, qkv, mask, train): # input: seq_len x emb
     proj_qkv = tuple([proj_fwd(p, x) for p, x in zip(layer_params, qkv)]) #TODO: vmap? For cross attn, qkv are not of the same shape..
     return scaled_dot_prod_attn(proj_qkv, mask, train)
 
-tlayer_attn_heads_fwd = torch.vmap(tlayer_attn_head_fwd, in_dims=(0, None, None, None)) # TODO XXX: check in_dims vs JAX's in_axes
+tlayer_attn_heads_fwd = torch.vmap(tlayer_attn_head_fwd, in_dims=(0, None, None, None), randomness="different")
 
-def tlayer_attn_fwd(layer_params, qkv, mask, key, train): # input: seq_len x emb_dim
+def tlayer_attn_fwd(layer_params, qkv, mask, train): # input: seq_len x emb_dim
     num_heads = layer_params[0].shape[0]
     heads_attns = tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train)
-    attn = torch.concatenate(heads_attns, axis=-1)
+    attn = torch.concatenate(torch.unbind(heads_attns, 0), axis=-1) # TODO XXX: there is probably better way to go from [K, M, N] -> [M, K*N]. Or modify VMAP to return diff shape
     return proj_fwd(layer_params[-1], attn)
 
 def tlayer_ffn_fwd(layer_params, x, activation_fn): # input: seq_len x emb_dim
@@ -132,4 +130,4 @@ def forward_gpt2(params, y, y_mask, y_indices, train): # input: seq_len x
     y = linear_fwd(params[0], y) 
     return y
 
-batched_forward_gpt2 = torch.vmap(forward_gpt2, in_dims=(None, 0, 0, 0, None)) # TODO XXX: check in_dims vs JAX's in_axes
+batched_forward_gpt2 = torch.vmap(forward_gpt2, in_dims=(None, 0, 0, 0, None), randomness="different") # TODO XXX: output will be batched unlike JAX's vmap
