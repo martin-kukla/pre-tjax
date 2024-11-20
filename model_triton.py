@@ -81,7 +81,7 @@ def tlayer_attn_head_fwd(layer_params, qkv, mask, train): # input: seq_len x emb
     proj_qkv = tuple([proj_fwd(p, x) for p, x in zip(layer_params, qkv)]) #TODO: vmap? For cross attn, qkv are not of the same shape..
     return scaled_dot_prod_attn(proj_qkv, mask, train)
 
-tlayer_attn_heads_fwd = torch.vmap(tlayer_attn_head_fwd, in_axes=(0, None, None, None))
+tlayer_attn_heads_fwd = torch.vmap(tlayer_attn_head_fwd, in_dims=(0, None, None, None)) # TODO XXX: check in_dims vs JAX's in_axes
 
 def tlayer_attn_fwd(layer_params, qkv, mask, key, train): # input: seq_len x emb_dim
     num_heads = layer_params[0].shape[0]
@@ -132,4 +132,4 @@ def forward_gpt2(params, y, y_mask, y_indices, train): # input: seq_len x
     y = linear_fwd(params[0], y) 
     return y
 
-batched_forward_gpt2 = torch.vmap(forward_gpt2, in_axes=(None, 0, 0, 0, None))
+batched_forward_gpt2 = torch.vmap(forward_gpt2, in_dims=(None, 0, 0, 0, None)) # TODO XXX: check in_dims vs JAX's in_axes
