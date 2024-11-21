@@ -48,9 +48,9 @@ def loss(params, y, y_mask, y_indices, train):  # inputs: batch_size x seq_len
     return loss_val, (loss_val, acc, tokens_count/y_out.numel()) # TODO: this is wrapping, but we could make use of jax.value_and_grad instead
 
 loss_train = partial(loss, train=True)
-loss_eval = partial(loss, train=False) # TODO XXX: we jitted for JAX, but want to do torch.compile for PyTorch
+loss_eval = torch.compile(partial(loss, train=False))
 
-grad_loss = grad(loss_train, has_aux=True) # TODO XXX: we jitted for JAX, but want to do torch.compile for PyTorch
+grad_loss = torch.compile(grad(loss_train, has_aux=True))
 
 # print(f'iter #{i} loss {loss_train(params, jnp.array(x[:1]), jnp.array(y[:1]), random.PRNGKey(0))[0] }')
 
