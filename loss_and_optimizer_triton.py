@@ -79,6 +79,7 @@ grad_loss = torch.compile(grad(loss_train, has_aux=True))
 
 # # Accumulates gradients in place
 # @partial(jax.jit, donate_argnames=("acc_grads")) # TODO XXX: use torch.compile here. TODO XXX: What about in_place operations??
+#@torch.compile
 def acc_grad_loss(acc_grads, params, y, y_mask, y_indices):
     i_step_grads, grad_loss_rest = grad_loss(params, y, y_mask, y_indices)
     
@@ -114,6 +115,7 @@ def init_adam_w(params): # initializes grads and moments estimates
 
 # from functools import partial
 # @partial(jax.jit, donate_argnames=("params","moments"), static_argnames=["weight_decay_mask"]) # TODO XXX: ADD torch.compile, how to achieve in-place operations (see below)?
+#@torch.compile
 def adam_w_in_place(params, grads, lr, betas, epsilon, moments, i, weight_decay=0.0, weight_decay_mask=None):
     t = i + 1 # TODO: should we decuple iteration from t, and threading t instead?
 
