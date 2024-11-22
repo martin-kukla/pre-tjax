@@ -166,7 +166,7 @@ def t_scaled_dot_prod_attn(qkv, mask, train=True): # inputs: seq_len x emb_dim, 
     return torch.matmul(softmaxed_attn, v) # output: seq_len x emb_dim
 
 def t_tlayer_attn_head_fwd(layer_params, qkv, mask, train): # input: seq_len x emb_dim
-    proj_qkv = tuple([proj_fwd(p, x) for p, x in zip(layer_params, qkv)]) #TODO: vmap? For cross attn, qkv are not of the same shape..
+    proj_qkv = tuple([t_proj_fwd(p, x) for p, x in zip(layer_params, qkv)]) #TODO: vmap? For cross attn, qkv are not of the same shape..
     return t_scaled_dot_prod_attn(proj_qkv, mask, train)
 
 t_tlayer_attn_heads_fwd = torch.vmap(t_tlayer_attn_head_fwd, in_dims=(0, None, None, None), randomness="different")
