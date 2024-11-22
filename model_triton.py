@@ -169,7 +169,9 @@ def t_tlayer_attn_head_fwd(layer_params, qkv, mask, train): # input: seq_len x e
     proj_qkv = tuple([t_proj_fwd(p, x) for p, x in zip(layer_params, qkv)]) #TODO: vmap? For cross attn, qkv are not of the same shape..
     return t_scaled_dot_prod_attn(proj_qkv, mask, train)
 
-t_tlayer_attn_heads_fwd = torch.vmap(t_tlayer_attn_head_fwd, in_dims=(0, None, None, None), randomness="different")
+#t_tlayer_attn_heads_fwd = torch.vmap(t_tlayer_attn_head_fwd, in_dims=(0, None, None, None), randomness="different")
+def t_tlayer_attn_heads_fwd(layer_params, qkv, mask, train):
+    return torch.stack([t_tlayer_attn_head_fwd(head_params, qkv, mask, train) for head_params in layer_params]) # TODO XXX XXX: vectorize!
 
 def t_tlayer_attn_fwd(layer_params, qkv, mask, train): # input: seq_len x emb_dim
     num_heads = layer_params[0].shape[0]
@@ -198,10 +200,10 @@ def t_layernorm_fwd(layer_params, x):
 def t_tlayer_fwd_gpt2(layer_params, y, mask, train=True): # input: seq_len x emb_dim
 
     y_diff = t_layernorm_fwd(layer_params[:2], y)
-    y = y + t_dropout(tlayer_attn_fwd(layer_params[2:-6], (y_diff, y_diff, y_diff), mask, train), train)
+    y = y + t_dropout(t_tlayer_attn_fwd(layer_params[2:-6], (y_diff, y_diff, y_diff), mask, train), train)
 
     y_diff = t_layernorm_fwd(layer_params[-6:-4], y)
-    y = y + t_dropout(tlayer_ffn_fwd(layer_params[-4:], y_diff, gelu), train)
+    y = y + t_dropout(t_tlayer_ffn_fwd(layer_params[-4:], y_diff, gelu), train)
     return y
 
 def t_tlayers_fwd_gpt2(params, y, mask, indices, train=True): # input: seq_len x
@@ -220,4 +222,6 @@ def t_forward_gpt2(params, y, y_mask, y_indices, train): # input: seq_len x
     y = t_linear_fwd(params[0], y) 
     return y
 
+
 t_batched_forward_gpt2 = torch.vmap(t_forward_gpt2, in_dims=(None, 0, 0, 0, None), randomness="different") # TODO XXX: output will be batched unlike JAX's vmap
+#t_batched_forward_gpt2 = t_forward_gpt2
