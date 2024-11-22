@@ -157,7 +157,7 @@ def t_proj_fwd(layer_params, x): # input: seq_len x emb_dim
 
 def t_scaled_dot_prod_attn(qkv, mask, train=True): # inputs: seq_len x emb_dim, mask: seq_len(q) x seq_len(k)
     q, k, v = qkv
-    attn = torch.matmul(q, torch.transpose(k, 0, 1)) # seq_len(q) x seq_len(k)
+    attn = torch.matmul(q, torch.transpose(k, -2, -1)) # seq_len(q) x seq_len(k)
     attn = attn / math.sqrt(q.shape[-1]) # scale by sqrt(d_k)
     #attn = jnp.where(mask, attn, jnp.full_like(attn, -jnp.inf))
     attn = torch.where(mask, attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
@@ -223,5 +223,5 @@ def t_forward_gpt2(params, y, y_mask, y_indices, train): # input: seq_len x
     return y
 
 
-t_batched_forward_gpt2 = torch.vmap(t_forward_gpt2, in_dims=(None, 0, 0, 0, None), randomness="different") # TODO XXX: output will be batched unlike JAX's vmap
-#t_batched_forward_gpt2 = t_forward_gpt2
+#t_batched_forward_gpt2 = torch.vmap(t_forward_gpt2, in_dims=(None, 0, 0, 0, None), randomness="different") # TODO XXX: output will be batched unlike JAX's vmap
+t_batched_forward_gpt2 = t_forward_gpt2
