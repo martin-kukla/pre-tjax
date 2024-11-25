@@ -171,12 +171,12 @@ def t_tlayer_attn_head_fwd(layer_params, qkv, mask, train): # input: seq_len x e
 
 #t_tlayer_attn_heads_fwd = torch.vmap(t_tlayer_attn_head_fwd, in_dims=(0, None, None, None), randomness="different")
 def t_tlayer_attn_heads_fwd(layer_params, qkv, mask, train):
-    return torch.stack([t_tlayer_attn_head_fwd(head_params, qkv, mask, train) for head_params in layer_params]) # TODO XXX XXX: vectorize!
+    return torch.stack([t_tlayer_attn_head_fwd(head_params, qkv, mask, train) for head_params in layer_params], dim=-3) # TODO XXX XXX: vectorize!
 
 def t_tlayer_attn_fwd(layer_params, qkv, mask, train): # input: seq_len x emb_dim
     num_heads = layer_params[0].shape[0]
     heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train)
-    attn = torch.concatenate(torch.unbind(heads_attns, 0), axis=-1) # TODO XXX: there is probably better way to go from [K, M, N] -> [M, K*N]. Or modify VMAP to return diff shape
+    attn = torch.concatenate(torch.unbind(heads_attns, -3), axis=-1) # TODO XXX XXX: there is probably better way to go from [K, M, N] -> [M, K*N]. Or modify VMAP to return diff shape
     return t_proj_fwd(layer_params[-1], attn)
 
 def t_tlayer_ffn_fwd(layer_params, x, activation_fn): # input: seq_len x emb_dim
