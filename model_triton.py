@@ -169,11 +169,10 @@ def t_tlayer_attn_head_fwd(layer_params, qkv, mask, train): # input: batch_size 
     proj_qkv = tuple([t_proj_fwd(p, x) for p, x in zip(layer_params, qkv)]) #TODO: vmap? For cross attn, qkv are not of the same shape..
     return t_scaled_dot_prod_attn(proj_qkv, mask, train)
 
-#t_tlayer_attn_heads_fwd = torch.vmap(t_tlayer_attn_head_fwd, in_dims=(0, None, None, None), randomness="different")
-def t_tlayer_attn_heads_fwd(layer_params, qkv, mask, train):
+def t_tlayer_attn_heads_fwd(layer_params, qkv, mask, train): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
     return torch.stack([t_tlayer_attn_head_fwd(head_params, qkv, mask, train) for head_params in layer_params], dim=-3) # TODO XXX XXX: vectorize!
 
-def t_tlayer_attn_fwd(layer_params, qkv, mask, train): # params: heads x 3 x emb_dim/heads x emb_dim; input: batch_size x seq_len x emb_dim
+def t_tlayer_attn_fwd(layer_params, qkv, mask, train): # input: batch_size x seq_len x emb_dim
     num_heads = layer_params[0].shape[0]
     heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train)
     attn = torch.concatenate(torch.unbind(heads_attns, -3), axis=-1) # TODO XXX XXX: there is probably better way to go from [K, M, N] -> [M, K*N]. Or modify VMAP to return diff shape
