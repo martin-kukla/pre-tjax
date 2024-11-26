@@ -153,24 +153,23 @@ def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
 
 def t_proj_fwd(layer_params, x): # input: seq_len x emb_dim
-    return torch.matmul(x, torch.transpose(layer_params, 0, 1)) # since layer_params is output_dim x emb_dim
+    return torch.matmul(x, torch.transpose(layer_params, -2, -1)) # since layer_params is ... x output_dim x emb_dim
 
-def t_scaled_dot_prod_attn(qkv, mask, train=True): # inputs: batch_size x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
-    q, k, v = qkv
+def t_scaled_dot_prod_attn(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
+    q, k, v = torch.unbind(qkv, dim=2)# batch_size x heads x seq_len x emb_dim
     attn = torch.matmul(q, torch.transpose(k, -2, -1)) # seq_len(q) x seq_len(k)
     attn = attn / math.sqrt(q.shape[-1]) # scale by sqrt(d_k)
     #attn = jnp.where(mask, attn, jnp.full_like(attn, -jnp.inf))
-    attn = torch.where(mask, attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
+    attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
     softmaxed_attn = torch.exp(log_softmax(attn))
     softmaxed_attn = t_dropout(softmaxed_attn, train)
     return torch.matmul(softmaxed_attn, v) # output: seq_len x emb_dim
 
-def t_tlayer_attn_head_fwd(layer_params, qkv, mask, train): # input: batch_size x seq_len x emb_dim
-    proj_qkv = tuple([t_proj_fwd(p, x) for p, x in zip(layer_params, qkv)]) #TODO: vmap? For cross attn, qkv are not of the same shape..
-    return t_scaled_dot_prod_attn(proj_qkv, mask, train)
-
 def t_tlayer_attn_heads_fwd(layer_params, qkv, mask, train): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
-    return torch.stack([t_tlayer_attn_head_fwd(head_params, qkv, mask, train) for head_params in layer_params], dim=-3) # TODO XXX XXX: vectorize!
+    qkv = torch.stack(qkv,dim=-3) # batch_size x 3 x seq_len x emb_dim
+    
+    proj_qkv = t_proj_fwd(layer_params, torch.unsqueeze(qkv, 1)) # batch_size x heads x 3 x seq_len x emb_dim
+    return t_scaled_dot_prod_attn(proj_qkv, mask, train)
 
 def t_tlayer_attn_fwd(layer_params, qkv, mask, train): # input: batch_size x seq_len x emb_dim
     num_heads = layer_params[0].shape[0]
