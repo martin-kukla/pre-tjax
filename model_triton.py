@@ -155,7 +155,7 @@ def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
 def t_proj_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params, 0, 1)) # since layer_params is output_dim x emb_dim
 
-def t_scaled_dot_prod_attn(qkv, mask, train=True): # inputs: seq_len x emb_dim, mask: seq_len(q) x seq_len(k)
+def t_scaled_dot_prod_attn(qkv, mask, train=True): # inputs: batch_size x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
     q, k, v = qkv
     attn = torch.matmul(q, torch.transpose(k, -2, -1)) # seq_len(q) x seq_len(k)
     attn = attn / math.sqrt(q.shape[-1]) # scale by sqrt(d_k)
@@ -165,7 +165,7 @@ def t_scaled_dot_prod_attn(qkv, mask, train=True): # inputs: seq_len x emb_dim, 
     softmaxed_attn = t_dropout(softmaxed_attn, train)
     return torch.matmul(softmaxed_attn, v) # output: seq_len x emb_dim
 
-def t_tlayer_attn_head_fwd(layer_params, qkv, mask, train): # input: seq_len x emb_dim
+def t_tlayer_attn_head_fwd(layer_params, qkv, mask, train): # input: batch_size x seq_len x emb_dim
     proj_qkv = tuple([t_proj_fwd(p, x) for p, x in zip(layer_params, qkv)]) #TODO: vmap? For cross attn, qkv are not of the same shape..
     return t_scaled_dot_prod_attn(proj_qkv, mask, train)
 
@@ -173,7 +173,7 @@ def t_tlayer_attn_head_fwd(layer_params, qkv, mask, train): # input: seq_len x e
 def t_tlayer_attn_heads_fwd(layer_params, qkv, mask, train):
     return torch.stack([t_tlayer_attn_head_fwd(head_params, qkv, mask, train) for head_params in layer_params], dim=-3) # TODO XXX XXX: vectorize!
 
-def t_tlayer_attn_fwd(layer_params, qkv, mask, train): # input: seq_len x emb_dim
+def t_tlayer_attn_fwd(layer_params, qkv, mask, train): # params: heads x 3 x emb_dim/heads x emb_dim; input: batch_size x seq_len x emb_dim
     num_heads = layer_params[0].shape[0]
     heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train)
     attn = torch.concatenate(torch.unbind(heads_attns, -3), axis=-1) # TODO XXX XXX: there is probably better way to go from [K, M, N] -> [M, K*N]. Or modify VMAP to return diff shape
