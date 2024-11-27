@@ -17,12 +17,22 @@ def t_log_softmax(x_logits): # compute log_softmax from logits over the last dim
 def t_embed(layer_params, x): # input: 1 x
     return layer_params[0][x] * math.sqrt(layer_params[0].shape[1]) # since layer_params[0] is vocab_size x emb_dim
 
-def t_relu(x):
-    return torch.maximum(0, x)
+def t_relu_fwd(x):
+    return torch.where(torch.le(x, 0), 0, x) # inputs can broadcastable - follow pytorch's implementation
 
-def t_gelu(x):
+def t_relu_bkwd(x):
+    return torch.where(torch.le(x, 0), 0, 1)
+
+def t_gelu_fwd(x):
     k = math.sqrt(2/math.pi)
     return 0.5 * x * (1 + torch.tanh(k * (x + 0.044715 * torch.pow(x,3))))
+
+def t_gelu_bkwd(x): # TODO XXX XXX: I think maths can be simplified here? 
+    k = math.sqrt(2/math.pi)
+    tanh_term = torch.tanh(k * (x + 0.044715 * torch.pow(x,3)))
+    tanh_dx = (1 - torch.pow(tanh_term, 2)) * k * ( 1 + 3 * 0.044715 * torch.pow(x,2))
+    
+    return 0.5 * (1 + tanh_term) + 0.5 * x * tanh_dx
 
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
@@ -76,7 +86,7 @@ def t_tlayer_fwd_gpt2(layer_params, y, mask, train=True): # input: seq_len x emb
     y = y + t_dropout(t_tlayer_attn_fwd(layer_params[2:-6], (y_diff, y_diff, y_diff), mask, train), train)
 
     y_diff = t_layernorm_fwd(layer_params[-6:-4], y)
-    y = y + t_dropout(t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu), train)
+    y = y + t_dropout(t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu_fwd), train)
     return y
 
 def t_tlayers_fwd_gpt2(params, y, mask, indices, train=True): # input: seq_len x
