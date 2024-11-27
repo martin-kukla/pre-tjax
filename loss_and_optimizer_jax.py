@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from jax import grad, jit, lax 
 from jax import random
-from model import log_softmax, batched_forward_gpt2 # TODO XXX XXX: pass forward fn as parameter to relevant functions instead!
+from model_jax import log_softmax, batched_forward_gpt2 # TODO XXX XXX: pass forward fn as parameter to relevant functions instead!
 
 def avg_cross_entropy_loss(y_labels, x_logits): # y_labels: batch_len x seq_len, x_logits: batch_len x seq_len x vocab_size
     # Note that in jax, un-jitted reshape calls are producing copies of array instead of views.
