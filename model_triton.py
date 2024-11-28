@@ -14,8 +14,20 @@ def t_log_softmax(x_logits): # compute log_softmax from logits over the last dim
     x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0] # as it returns (maxs, indices)
     return x_logits - torch.logsumexp(x_logits, axis=-1, keepdims=True)
 
-def t_embed(layer_params, x): # input: 1 x
+def t_embed_fwd(layer_params, x): # input: 1 x
     return layer_params[0][x] * math.sqrt(layer_params[0].shape[1]) # since layer_params[0] is vocab_size x emb_dim
+
+def t_embed_bkwd(layer_params, x): # input: 1 x
+    emb_size = layer_params[0].shape[1]    
+    fn_outdim = torch.numel(x) * emb_size
+    fn_indim =  torch.numel(layer_params[0])
+    jac = torch.zeros(fn_outdim, fn_indim, device=x.device)
+    
+    indices = torch.tile(torch.arange(emb_size, device=x.device), (x.numel(), 1))
+    indices = ((x * emb_size).unsqueeze(1) + indices).reshape(-1, 1)
+    jac.scatter_(1, indices, math.sqrt(emb_size))
+    
+    return (jac.reshape(torch.numel(x), emb_size, layer_params[0].shape[0], layer_params[0].shape[1]), )
 
 def t_relu_fwd(x):
     return torch.where(torch.le(x, 0), 0, x) # inputs can broadcastable - follow pytorch's implementation
@@ -90,7 +102,7 @@ def t_tlayer_fwd_gpt2(layer_params, y, mask, train=True): # input: seq_len x emb
     return y
 
 def t_tlayers_fwd_gpt2(params, y, mask, indices, train=True): # input: seq_len x
-    y = t_embed(params[0], y)
+    y = t_embed_fwd(params[0], y)
     y = t_dropout(y + params[1][0], train)
     
     for layer_params in params[2:-1]:
