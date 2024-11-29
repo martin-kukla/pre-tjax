@@ -4,15 +4,33 @@ DROPOUT_RATE = 0.1 # TODO: move it out, and pass as paramteter
 import math
 import torch
 
-### PARAMS: they are teh same as for Torch.Func
+### PARAMS: they are the same as for Torch.Func, so import
 
-from model_torch_func import log_softmax, init_transformer_gpt2, count_num_params, batched_forward_gpt2
+from model_torch_func import init_transformer_gpt2, count_num_params, batched_forward_gpt2
 
 ### MODEL in TRITON
 
-def t_log_softmax(x_logits): # compute log_softmax from logits over the last dimension
+def t_log_softmax_fwd(x_logits): # compute log_softmax from logits over the last dimension
     x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0] # as it returns (maxs, indices)
     return x_logits - torch.logsumexp(x_logits, axis=-1, keepdims=True)
+
+# Other module assumes different name
+# TODO XXX: fix references in other file
+log_softmax = t_log_softmax_fwd 
+
+def t_log_softmax_bkwd(x_logits):
+    outdim1 = x_logits.shape[0]
+    outdim2 = x_logits.shape[1]
+    
+    x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0]
+    logsums = torch.logsumexp(x_logits, axis=-1, keepdims=True)
+    exp_logsums = torch.exp(logsums).unsqueeze(2) # Q: is it going to be numerically stable?
+    
+    jac = torch.repeat_interleave(-torch.exp(x_logits), outdim2, dim=0, output_size=x_logits.numel())
+    jac = jac.reshape(outdim1, outdim2, outdim2)
+    jac_eye = torch.eye(outdim2, device=x_logits.device).unsqueeze(0).expand(outdim1, outdim2, outdim2)
+    jac = (exp_logsums * jac_eye + jac) / exp_logsums
+    return torch.block_diag(*jac.unbind(0)).reshape(outdim1, outdim2, outdim1, outdim2)
 
 def t_embed_fwd(layer_params, x): # input: 1 x
     return layer_params[0][x] * math.sqrt(layer_params[0].shape[1]) # since layer_params[0] is vocab_size x emb_dim
@@ -20,7 +38,7 @@ def t_embed_fwd(layer_params, x): # input: 1 x
 def t_embed_bkwd(layer_params, x): # input: 1 x
     emb_size = layer_params[0].shape[1]    
     fn_outdim = torch.numel(x) * emb_size
-    fn_indim =  torch.numel(layer_params[0])
+    fn_indim =  torch.numel(layer_params[0]) # jacobian with respect to params
     jac = torch.zeros(fn_outdim, fn_indim, device=x.device)
     
     indices = torch.tile(torch.arange(emb_size, device=x.device), (x.numel(), 1))
@@ -30,7 +48,7 @@ def t_embed_bkwd(layer_params, x): # input: 1 x
     return (jac.reshape(torch.numel(x), emb_size, layer_params[0].shape[0], layer_params[0].shape[1]), )
 
 def t_relu_fwd(x):
-    return torch.where(torch.le(x, 0), 0, x) # inputs can broadcastable - follow pytorch's implementation
+    return torch.where(torch.le(x, 0), 0, x) # as inputs are broadcastable in where&le - follows pytorch's implementation
 
 def t_relu_bkwd(x):
     return torch.where(torch.le(x, 0), 0, 1)
@@ -58,7 +76,7 @@ def t_scaled_dot_prod_attn(qkv, mask, train=True): # inputs: batch_size x heads 
     attn = attn / math.sqrt(q.shape[-1]) # scale by sqrt(d_k)
     #attn = jnp.where(mask, attn, jnp.full_like(attn, -jnp.inf))
     attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
-    softmaxed_attn = torch.exp(log_softmax(attn))
+    softmaxed_attn = torch.exp(t_log_softmax_fwd(attn))
     softmaxed_attn = t_dropout(softmaxed_attn, train)
     return torch.matmul(softmaxed_attn, v) # output: seq_len x emb_dim
 
