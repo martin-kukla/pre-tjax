@@ -26,6 +26,7 @@ def t_log_softmax_bkwd(x_logits):
     logsums = torch.logsumexp(x_logits, axis=-1, keepdims=True)
     exp_logsums = torch.exp(logsums).unsqueeze(2) # Q: is it going to be numerically stable?
     
+    # TODO XXX: can I use expand for the below line?
     jac = torch.repeat_interleave(-torch.exp(x_logits), outdim2, dim=0, output_size=x_logits.numel())
     jac = jac.reshape(outdim1, outdim2, outdim2)
     jac_eye = torch.eye(outdim2, device=x_logits.device).unsqueeze(0).expand(outdim1, outdim2, outdim2)
@@ -66,6 +67,21 @@ def t_gelu_bkwd(x): # TODO XXX XXX: I think maths can be simplified here?
 
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
+
+# TODO XXX: clean it up
+# TODO XXX2: add one with respect to x (now with respect to params only)
+def t_linear_bkwd(layer_params, x): # input: seq_len x emb_dim
+    x_indim = x.shape[0] # TODO: support x > 2D
+    outdim = layer_params[1].shape[0]
+
+    jac1 = x.unsqueeze(1).expand(x_indim, outdim, x.shape[1]).reshape(-1, x.shape[1])
+    jac1 = torch.block_diag(*jac1.unbind(0))
+    aux = torch.eye(outdim*x_indim, device = x.device).repeat(x_indim, 1) # transform to get right shape
+    jac1 = torch.matmul(jac1, aux)
+
+    jac1 = jac1.reshape(x_indim, outdim, outdim, x.shape[1])
+    jac2 = torch.eye(outdim).expand((x_indim, outdim, outdim))
+    return jac1, jac2
 
 def t_proj_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params, -2, -1)) # since layer_params is ... x output_dim x emb_dim
