@@ -6,4 +6,5 @@ Transformers written from first principle in JAX/Torch.Func/Triton; Comparison o
 - **train_gpt2_jax.ipynb**: replicates the setup from GPT2 paper, but it trains on FineWeb-Edu, and evaluates on HellaSwag
 - **model_jax.py**: AIAYN/GPT2 architectures written in JAX from first principle
 - **model_torch_func.py**: GPT2 architecture written in funcational PyTorch (i.e. torch.func) from first principle
+- **model_triton.py**: (WIP) GPT2 architecture written in Triton from first principle. Current status: Jacobians implemented for the basic blocks
 - **tokenizer.py**: BPE tokenizer writtern from scrach
