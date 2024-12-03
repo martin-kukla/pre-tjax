@@ -104,13 +104,9 @@ def t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
     jac = layer_params.unsqueeze(0).expand(BS, outdim, N)
     jac = jac.unsqueeze(-2).expand(BS, outdim, BS, N)
     
-    # TODO XXX: Vectorize (can't we just do it with some smart expand?)
-    jac = jac.clone()
-    for i in range(BS):
-        for j in range(BS):
-            if i!=j:
-                jac[i,:,j,:] = torch.zeros(outdim, N)
-    return jac
+    aux = torch.eye(BS).unsqueeze(1).expand(BS, outdim, BS)
+    aux = aux.unsqueeze(-1).expand(BS, outdim, BS, N)
+    return jac*aux
 
 def t_scaled_dot_prod_attn(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
     q, k, v = torch.unbind(qkv, dim=2)# batch_size x heads x seq_len x emb_dim
