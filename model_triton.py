@@ -136,28 +136,25 @@ def t_layernorm_fwd(layer_params, x):
     normalized_x = (x - x_mean) / x_std
     return torch.multiply(x, layer_params[0][None, :]) + layer_params[1][None, :] # since both layer_params are output_dim x
 
-# TODO XXX: WIP. For now, only: d [(x -x_mean)/x_std]/ dx
-def t_layernorm_bkwd(x):
-    def std_bkwd(x):
-        N = x.shape[-1]
-        x_mean = torch.mean(x, axis=-1, keepdims=True)
-        x_std = torch.std(x, axis=-1, keepdims = True)
-        return 1 / (x_std * (N-1)) * (x - x_mean)
-
+# TODO XXX: maybe return full jacobian (rows are independent, so we skip rows of 0s)
+def std_bkwd(x): 
     N = x.shape[-1]
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims = True)
-    
-    
+    return 1 / (x_std * (N-1)) * (x - x_mean)
+
+# TODO XXX: maybe return full jacobian (rows are independent, so we skip rows of 0s)
+def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
+    N = x.shape[-1]
+    x_mean = torch.mean(x, axis=-1, keepdims=True)
+    x_std = torch.std(x, axis=-1, keepdims = True)
+     
     x_eye = torch.eye(N, device=x.device).expand(x.shape[0], N, N)
-    fdx_g = (x_eye - 1/N) *x_std 
-    #fdx_g = (x_eye - 1/N) *x_std.unsqueeze(-1) # WIP: nrows version
-    f_gdx = (x-x_mean).transpose(0,1) * std_bkwd(x)
-    #f_gdx = (x-x_mean).unsqueeze(-1) * std_bkwd(x).unsqueeze(-1) # WIP: nrows version
+    fdx_g = (x_eye - 1/N) *x_std.unsqueeze(-1)
+    f_gdx = torch.matmul((x-x_mean).unsqueeze(-1), std_bkwd(x).unsqueeze(-2)) 
     g_pow2 = 1/torch.pow(x_std, 2)
-    #g_pow2 = 1/torch.pow(x_std, 2).unsqueeze(-1) # WIP: nrows version
-    
-    return g_pow2 * (fdx_g  - f_gdx)
+
+    return g_pow2.unsqueeze(-1) * (fdx_g  - f_gdx)
 
 def t_tlayer_fwd_gpt2(layer_params, y, mask, train=True): # input: seq_len x emb_dim
 
