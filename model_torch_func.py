@@ -103,7 +103,7 @@ def layernorm_fwd(layer_params, x):
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims=True) # TODO XXX: Compute variance, add epsilon and take a sqrt instead (in order to avoid division by zero)
     normalized_x = (x - x_mean) / x_std
-    return torch.multiply(x, layer_params[0][None, :]) + layer_params[1][None, :] # since both layer_params are output_dim x
+    return torch.multiply(normalized_x, layer_params[0][None, :]) + layer_params[1][None, :] # since both layer_params are output_dim x
 
 def tlayer_fwd_gpt2(layer_params, y, mask, train=True): # input: seq_len x emb_dim
 
