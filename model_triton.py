@@ -70,21 +70,22 @@ def t_gelu_bkwd(x): # TODO XXX XXX: I think maths can be simplified here?
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
 
-
-# TODO XXX: add bkwd with respect to x
-def t_linear_bkwd(layer_params, x): # input: seq_len x emb_dim
+def t_linear_bkwd_p(layer_params, x): # input: seq_len x emb_dim
     x_indim = x.shape[0] # TODO: support x > 2D
     outdim = layer_params[1].shape[0]
 
-    jac1 = t_proj_bkwd(layer_params[0], x)
+    jac1 = t_proj_bkwd_p(layer_params[0], x)
     jac2 = torch.eye(outdim).expand((x_indim, outdim, outdim))
     return jac1, jac2
+
+def t_linear_bkwd_x(layer_params, x): # input: seq_len x emb_dim
+    return t_proj_bkwd_x(layer_params[0], x)
 
 def t_proj_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params, -2, -1)) # since layer_params is ... x output_dim x emb_dim
 
 # TODO XXX: clean it up
-def t_proj_bkwd(layer_params, x): # input: seq_len x emb_dim
+def t_proj_bkwd_p(layer_params, x): # input: seq_len x emb_dim
     x_indim = x.shape[0] # TODO: support x > 2D
     outdim = layer_params.shape[0]
 
@@ -95,6 +96,17 @@ def t_proj_bkwd(layer_params, x): # input: seq_len x emb_dim
 
     jac = jac.reshape(x_indim, outdim, outdim, x.shape[1])
     return jac
+
+def t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
+    BS = x.shape[0] # TODO: support x > 2D
+    N = x.shape[1]
+    outdim = layer_params.shape[0]
+    jac = layer_params.unsqueeze(0).expand(BS, outdim, N)
+    jac = jac.unsqueeze(-2).expand(BS, outdim, BS, N)
+    
+    aux = torch.eye(BS).unsqueeze(1).expand(BS, outdim, BS)
+    aux = aux.unsqueeze(-1).expand(BS, outdim, BS, N)
+    return jac*aux
 
 def t_scaled_dot_prod_attn(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
     q, k, v = torch.unbind(qkv, dim=2)# batch_size x heads x seq_len x emb_dim
@@ -134,7 +146,44 @@ def t_layernorm_fwd(layer_params, x):
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims=True) # TODO XXX: Compute variance, add epsilon and take a sqrt instead (in order to avoid division by zero)
     normalized_x = (x - x_mean) / x_std
-    return torch.multiply(x, layer_params[0][None, :]) + layer_params[1][None, :] # since both layer_params are output_dim x
+    return torch.multiply(normalized_x, layer_params[0][None, :]) + layer_params[1][None, :] # since both layer_params are output_dim x
+
+def t_layernorm_bkwd_p(layer_params, x):
+    x_indim = x.shape[0]
+    N = x.shape[-1]
+    outdim=layer_params[1].shape[0]
+    
+    
+    x_mean = torch.mean(x, axis=-1, keepdims=True)
+    x_std = torch.std(x, axis=-1, keepdims=True)
+    jac1 = ((x-x_mean)/x_std).unsqueeze(-1).repeat(1,1, N)
+    jac1_aux = torch.eye(N, device=x.device) # just used for reshaping
+    jac2 = torch.eye(outdim).expand((x_indim, outdim, outdim))
+    return jac1 *jac1_aux, jac2
+
+def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
+    # Note, below is "shorten Jacobian": rows are independent, so zeros in result are skipped.
+    def std_bkwd(x): 
+        N = x.shape[-1]
+        x_mean = torch.mean(x, axis=-1, keepdims=True)
+        x_std = torch.std(x, axis=-1, keepdims = True)
+        return 1 / (x_std * (N-1)) * (x - x_mean)
+
+    BS = x.shape[0]
+    N = x.shape[-1]
+    x_mean = torch.mean(x, axis=-1, keepdims=True)
+    x_std = torch.std(x, axis=-1, keepdims = True)
+     
+    x_eye = torch.eye(N, device=x.device).expand(x.shape[0], N, N)
+    fdx_g = (x_eye - 1/N) *x_std.unsqueeze(-1)
+    f_gdx = torch.matmul((x-x_mean).unsqueeze(-1), std_bkwd(x).unsqueeze(-2)) 
+    g_pow2 = 1/torch.pow(x_std, 2)
+
+    jac = g_pow2.unsqueeze(-1) * (fdx_g  - f_gdx)
+    return torch.block_diag(*jac.unbind(0)).reshape(BS, N, BS, N)
+
+def t_layernorm_bkwd_x(layer_params, x):
+    return (layer_params[0] * normalized_x_bkwd(x)).transpose(-3,-1)
 
 def t_tlayer_fwd_gpt2(layer_params, y, mask, train=True): # input: seq_len x emb_dim
 

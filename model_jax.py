@@ -139,7 +139,7 @@ def layernorm_fwd(layer_params, x):
     x_mean = jnp.mean(x, axis=-1, keepdims=True)
     x_std = jnp.std(x, axis=-1, keepdims=True) # TODO XXX: Compute variance, add epsilon and take a sqrt instead (in order to avoid division by zero)
     normalized_x = (x - x_mean) / x_std
-    return jnp.multiply(x, layer_params[0][None, :]) + layer_params[1][None, :] # since both layer_params are output_dim x
+    return jnp.multiply(normalized_x, layer_params[0][None, :]) + layer_params[1][None, :] # since both layer_params are output_dim x
 
 def tlayer_fwd_aiayn(layer_params, y, mask, key, train=True): # input: seq_len x emb_dim
     keys = random.split(key, 2)
