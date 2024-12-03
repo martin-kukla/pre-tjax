@@ -70,21 +70,22 @@ def t_gelu_bkwd(x): # TODO XXX XXX: I think maths can be simplified here?
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
 
-
-# TODO XXX: add bkwd with respect to x
-def t_linear_bkwd(layer_params, x): # input: seq_len x emb_dim
+def t_linear_bkwd_p(layer_params, x): # input: seq_len x emb_dim
     x_indim = x.shape[0] # TODO: support x > 2D
     outdim = layer_params[1].shape[0]
 
-    jac1 = t_proj_bkwd(layer_params[0], x)
+    jac1 = t_proj_bkwd_p(layer_params[0], x)
     jac2 = torch.eye(outdim).expand((x_indim, outdim, outdim))
     return jac1, jac2
+
+def t_linear_bkwd_x(layer_params, x): # input: seq_len x emb_dim
+    return t_proj_bkwd_x(layer_params[0], x)
 
 def t_proj_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params, -2, -1)) # since layer_params is ... x output_dim x emb_dim
 
 # TODO XXX: clean it up
-def t_proj_bkwd(layer_params, x): # input: seq_len x emb_dim
+def t_proj_bkwd_p(layer_params, x): # input: seq_len x emb_dim
     x_indim = x.shape[0] # TODO: support x > 2D
     outdim = layer_params.shape[0]
 
@@ -94,6 +95,21 @@ def t_proj_bkwd(layer_params, x): # input: seq_len x emb_dim
     jac = torch.matmul(jac, aux)
 
     jac = jac.reshape(x_indim, outdim, outdim, x.shape[1])
+    return jac
+
+def t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
+    BS = x.shape[0] # TODO: support x > 2D
+    N = x.shape[1]
+    outdim = layer_params.shape[0]
+    jac = layer_params.unsqueeze(0).expand(BS, outdim, N)
+    jac = jac.unsqueeze(-2).expand(BS, outdim, BS, N)
+    
+    # TODO XXX: Vectorize (can't we just do it with some smart expand?)
+    jac = jac.clone()
+    for i in range(BS):
+        for j in range(BS):
+            if i!=j:
+                jac[i,:,j,:] = torch.zeros(outdim, N)
     return jac
 
 def t_scaled_dot_prod_attn(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
