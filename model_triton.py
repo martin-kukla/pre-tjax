@@ -170,9 +170,8 @@ def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
     jac = g_pow2.unsqueeze(-1) * (fdx_g  - f_gdx)
     return torch.block_diag(*jac.unbind(0)).reshape(BS, N, BS, N)
 
-def t_layernorm_bkwd_x(layer_params, x):   
-    print(layer_params[0].shape)
-    return (layer_params[0] * normalized_x_bkwd(x)).transpose(-3,-1) # clean up transpose?
+def t_layernorm_bkwd_x(layer_params, x):
+    return (layer_params[0] * normalized_x_bkwd(x)).transpose(-3,-1)
 
 def t_tlayer_fwd_gpt2(layer_params, y, mask, train=True): # input: seq_len x emb_dim
 
