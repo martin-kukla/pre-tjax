@@ -136,8 +136,21 @@ def t_layernorm_fwd(layer_params, x):
     normalized_x = (x - x_mean) / x_std
     return torch.multiply(normalized_x, layer_params[0][None, :]) + layer_params[1][None, :] # since both layer_params are output_dim x
 
+def t_layernorm_bkwd_p(layer_params, x):
+    x_indim = x.shape[0]
+    N = x.shape[-1]
+    outdim=layer_params[1].shape[0]
+    
+    
+    x_mean = torch.mean(x, axis=-1, keepdims=True)
+    x_std = torch.std(x, axis=-1, keepdims=True)
+    jac1 = ((x-x_mean)/x_std).unsqueeze(-1).repeat(1,1, N)
+    jac1_aux = torch.eye(N, device=x.device) # just used for reshaping
+    jac2 = torch.eye(outdim).expand((x_indim, outdim, outdim))
+    return jac1 *jac1_aux, jac2
+
 def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
-    # Note, this is "shorten Jacobian": rows are independent, so zeros in result are skipped.
+    # Note, below is "shorten Jacobian": rows are independent, so zeros in result are skipped.
     def std_bkwd(x): 
         N = x.shape[-1]
         x_mean = torch.mean(x, axis=-1, keepdims=True)
