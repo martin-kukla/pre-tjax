@@ -136,15 +136,15 @@ def t_layernorm_fwd(layer_params, x):
     normalized_x = (x - x_mean) / x_std
     return torch.multiply(normalized_x, layer_params[0][None, :]) + layer_params[1][None, :] # since both layer_params are output_dim x
 
-# TODO XXX: maybe return full jacobian (rows are independent, so we skip rows of 0s)
-def std_bkwd(x): 
-    N = x.shape[-1]
-    x_mean = torch.mean(x, axis=-1, keepdims=True)
-    x_std = torch.std(x, axis=-1, keepdims = True)
-    return 1 / (x_std * (N-1)) * (x - x_mean)
-
-# TODO XXX: maybe return full jacobian (rows are independent, so we skip rows of 0s)
 def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
+    # Note, this is "shorten Jacobian": rows are independent, so zeros in result are skipped.
+    def std_bkwd(x): 
+        N = x.shape[-1]
+        x_mean = torch.mean(x, axis=-1, keepdims=True)
+        x_std = torch.std(x, axis=-1, keepdims = True)
+        return 1 / (x_std * (N-1)) * (x - x_mean)
+
+    BS = x.shape[0]
     N = x.shape[-1]
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims = True)
@@ -154,7 +154,8 @@ def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
     f_gdx = torch.matmul((x-x_mean).unsqueeze(-1), std_bkwd(x).unsqueeze(-2)) 
     g_pow2 = 1/torch.pow(x_std, 2)
 
-    return g_pow2.unsqueeze(-1) * (fdx_g  - f_gdx)
+    jac = g_pow2.unsqueeze(-1) * (fdx_g  - f_gdx)
+    return torch.block_diag(*jac.unbind(0)).reshape(BS, N, BS, N)
 
 def t_tlayer_fwd_gpt2(layer_params, y, mask, train=True): # input: seq_len x emb_dim
 
