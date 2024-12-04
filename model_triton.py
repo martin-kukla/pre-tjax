@@ -75,7 +75,7 @@ def t_linear_bkwd_p(layer_params, x): # input: seq_len x emb_dim
     outdim = layer_params[1].shape[0]
 
     jac1 = t_proj_bkwd_p(layer_params[0], x)
-    jac2 = torch.eye(outdim).expand((x_indim, outdim, outdim))
+    jac2 = torch.eye(outdim, device=x.device).expand((x_indim, outdim, outdim))
     return jac1, jac2
 
 def t_linear_bkwd_x(layer_params, x): # input: seq_len x emb_dim
