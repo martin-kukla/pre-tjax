@@ -135,6 +135,7 @@ def t_tlayer_ffn_fwd(layer_params, x, activation_fn): # input: seq_len x emb_dim
 
 def t_tlayer_ffn_bkwd_p(layer_params, x, activation_fn):
     act_fn_bkwd = t_gelu_bkwd if activation_fn==t_gelu_fwd else t_relu_bkwd
+    
     jac1 = t_linear_bkwd_p((layer_params[0], layer_params[1]), x)
     x = t_linear_fwd((layer_params[0], layer_params[1]), x)
     dact_dx = act_fn_bkwd(x)
@@ -145,6 +146,19 @@ def t_tlayer_ffn_bkwd_p(layer_params, x, activation_fn):
     jac1 = (torch.einsum('abcd,cdef->abef', dffn2_act_dx, jac1[0]),
             torch.einsum('abcd,cdf->abf', dffn2_act_dx, jac1[1]))
     return jac1[0], jac1[1], jac2[0], jac2[1]
+
+# TODO XXX: rethink design of bkwd_p being split from bkwd_x - they do the same computation
+def t_tlayer_ffn_bkwd_x(layer_params, x, activation_fn):
+    act_fn_bkwd = t_gelu_bkwd if activation_fn==t_gelu_fwd else t_relu_bkwd
+    
+    dffn1_dx = t_linear_bkwd_x((layer_params[0], layer_params[1]), x)
+    x = t_linear_fwd((layer_params[0], layer_params[1]), x)
+    dact_dx = act_fn_bkwd(x)
+    x = activation_fn(x)
+    dffn2_dx = t_linear_bkwd_x((layer_params[2], layer_params[3]), x)
+    dffn2_act_dx = dact_dx * dffn2_dx #Note dact_dx is only 2D, but torch will add other dims
+    jac = torch.einsum('abcd,cdef->abef', dffn2_act_dx, dffn1_dx)
+    return jac
 
 def t_dropout(x, train=True):
     if not train: # As we jit the whole loss/inference, the train param is known at tracing time.
