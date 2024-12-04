@@ -84,27 +84,24 @@ def t_linear_bkwd_x(layer_params, x): # input: seq_len x emb_dim
 def t_proj_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params, -2, -1)) # since layer_params is ... x output_dim x emb_dim
 
-# TODO XXX: clean it up
 def t_proj_bkwd_p(layer_params, x): # input: seq_len x emb_dim
-    x_indim = x.shape[0] # TODO: support x > 2D
+    BS, N = x.shape
     outdim = layer_params.shape[0]
 
-    jac = x.unsqueeze(1).expand(x_indim, outdim, x.shape[1]).reshape(-1, x.shape[1])
-    jac = torch.block_diag(*jac.unbind(0))
-    aux = torch.eye(outdim*x_indim, device = x.device).repeat(x_indim, 1) # transform to get right shape
-    jac = torch.matmul(jac, aux)
-
-    jac = jac.reshape(x_indim, outdim, outdim, x.shape[1])
-    return jac
+    jac = x.unsqueeze(1).expand(BS, outdim, N)
+    jac = jac.unsqueeze(-2).expand(BS, outdim, outdim, N)
+    
+    aux = torch.eye(outdim, device=x.device).unsqueeze(-1).expand(outdim, outdim, N)
+    aux = aux.unsqueeze(0).expand(BS, outdim, outdim, N)
+    return jac*aux
 
 def t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
-    BS = x.shape[0] # TODO: support x > 2D
-    N = x.shape[1]
+    BS, N = x.shape
     outdim = layer_params.shape[0]
     jac = layer_params.unsqueeze(0).expand(BS, outdim, N)
     jac = jac.unsqueeze(-2).expand(BS, outdim, BS, N)
     
-    aux = torch.eye(BS).unsqueeze(1).expand(BS, outdim, BS)
+    aux = torch.eye(BS, device=x.device).unsqueeze(1).expand(BS, outdim, BS)
     aux = aux.unsqueeze(-1).expand(BS, outdim, BS, N)
     return jac*aux
 
