@@ -107,7 +107,33 @@ def t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
     aux = aux.unsqueeze(-1).expand(BS, outdim, BS, N)
     return jac*aux
 
-def t_scaled_dot_prod_attn(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
+# TODO XXX: WIP
+def t_softmax_attn_fwd(q, k, mask, train):
+    D = q.shape[-1]
+    attn = torch.matmul(q, torch.transpose(k, -2, -1))
+    attn = attn / math.sqrt(D)
+    attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
+    softmaxed_attn = torch.exp(t_log_softmax_fwd(attn))
+    softmaxed_attn = t_dropout(softmaxed_attn, train)
+    return softmaxed_attn
+
+# TODO XXX: WIP 
+def t_softmax_attn_bkwd(q, k, mask, train):
+    D = q.shape[-1]
+    attn = torch.matmul(q, torch.transpose(k, -2, -1))
+    attn = attn / math.sqrt(D)
+    attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
+    softmaxed_attn = torch.exp(t_log_softmax_fwd(attn))
+    softmaxed_attn = t_dropout(softmaxed_attn, train)
+    
+    d_dropout_dx = 1 #0.9 # TODO: XXX add proper dropout 
+    dsoftmaxed_attn_dx = d_dropout_dx * softmaxed_attn[..., None, None, None, None] * t_log_softmax_bkwd(attn)
+    jac1 = torch.matmul(dsoftmaxed_attn_dx, k/math.sqrt(D))
+    jac2 = torch.matmul(q.transpose(-2,-1)/math.sqrt(D), dsoftmaxed_attn_dx).transpose(-2,-1)
+    return jac1, jac2
+
+# TODO XXX: Use t_softmax_attn_fwd above?
+def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
     q, k, v = torch.unbind(qkv, dim=2)# batch_size x heads x seq_len x emb_dim
     attn = torch.matmul(q, torch.transpose(k, -2, -1)) # seq_len(q) x seq_len(k)
     attn = attn / math.sqrt(q.shape[-1]) # scale by sqrt(d_k)
@@ -117,11 +143,32 @@ def t_scaled_dot_prod_attn(qkv, mask, train=True): # inputs: batch_size x heads 
     softmaxed_attn = t_dropout(softmaxed_attn, train)
     return torch.matmul(softmaxed_attn, v) # output: seq_len x emb_dim
 
+# TODO XXX: WIP 
+def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
+    BS, H, _, N, D = qkv.shape
+    q, k, v = torch.unbind(qkv, dim=2)
+    
+    softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train)
+    dsoftmaxed_attn_dq, dsoftmaxed_attn_dk = t_softmax_attn_bkwd(q, k, mask, train)  
+    
+    v_2d = v.reshape((-1, v.shape[-1]))
+    def mult_with_v_2d(A): # TODO XXX: write it properly 
+        A_4d_outdim_shape = (A.shape[0] * A.shape[1] *A.shape[2], A.shape[3])
+        A_4d = A.reshape(A_4d_outdim_shape+v_2d.shape)
+        jac_a = torch.einsum("abcd, bd -> abcd", A_4d, v_2d)
+        jac_a = jac_a.sum(1, keepdims=True) # TODO XXX: fix it
+        return jac_a
+    
+    jac_q = mult_with_v_2d(dsoftmaxed_attn_dq).reshape(v.shape + v.shape)
+    jac_k = mult_with_v_2d(dsoftmaxed_attn_dk).reshape(v.shape + v.shape)
+    jac_v = softmaxed_attn
+    return jac_q, jac_k, jac_v
+
 def t_tlayer_attn_heads_fwd(layer_params, qkv, mask, train): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
     qkv = torch.stack(qkv,dim=-3) # batch_size x 3 x seq_len x emb_dim
     
     proj_qkv = t_proj_fwd(layer_params, torch.unsqueeze(qkv, 1)) # batch_size x heads x 3 x seq_len x emb_dim
-    return t_scaled_dot_prod_attn(proj_qkv, mask, train)
+    return t_scaled_dot_prod_attn_fwd(proj_qkv, mask, train)
 
 def t_tlayer_attn_fwd(layer_params, qkv, mask, train): # input: batch_size x seq_len x emb_dim
     num_heads = layer_params[0].shape[0]
