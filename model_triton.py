@@ -143,7 +143,6 @@ def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True): # inputs: batch_size x he
     softmaxed_attn = t_dropout(softmaxed_attn, train)
     return torch.matmul(softmaxed_attn, v) # output: seq_len x emb_dim
 
-# TODO XXX: WIP 
 def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
     BS, H, _, N, D = qkv.shape
     q, k, v = torch.unbind(qkv, dim=2)
@@ -152,15 +151,17 @@ def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True): # inputs: batch_size x h
     dsoftmaxed_attn_dq, dsoftmaxed_attn_dk = t_softmax_attn_bkwd(q, k, mask, train)  
     
     v_2d = v.reshape((-1, v.shape[-1]))
-    def mult_with_v_2d(A): # TODO XXX: write it properly 
+    def mult_with_v_2d_bkwd(A): # A being 8D here
         A_4d_outdim_shape = (A.shape[0] * A.shape[1] *A.shape[2], A.shape[3])
         A_4d = A.reshape(A_4d_outdim_shape+v_2d.shape)
-        jac_a = torch.einsum("abcd, bd -> abcd", A_4d, v_2d)
-        jac_a = jac_a.sum(1, keepdims=True) # TODO XXX: fix it
+        
+        # TODO XXX: Clean up these reshapes
+        jac_a = torch.matmul(v_2d.transpose(1, 0), A_4d.transpose(1, 0).reshape(v_2d.shape[0], -1))
+        jac_ = jac_a.reshape(jac_a.shape[0], -1, v_2d.numel()).transpose(1, 0)
         return jac_a
     
-    jac_q = mult_with_v_2d(dsoftmaxed_attn_dq).reshape(v.shape + v.shape)
-    jac_k = mult_with_v_2d(dsoftmaxed_attn_dk).reshape(v.shape + v.shape)
+    jac_q = mult_with_v_2d_bkwd(dsoftmaxed_attn_dq).reshape(v.shape + v.shape)
+    jac_k = mult_with_v_2d_bkwd(dsoftmaxed_attn_dk).reshape(v.shape + v.shape)
     jac_v = softmaxed_attn
     return jac_q, jac_k, jac_v
 
