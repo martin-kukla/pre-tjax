@@ -181,10 +181,27 @@ def t_tlayer_attn_heads_fwd(layer_params, qkv, mask, train): # params: heads x 3
     proj_qkv = t_proj_fwd(layer_params, torch.unsqueeze(qkv, 1)) # batch_size x heads x 3 x seq_len x emb_dim
     return t_scaled_dot_prod_attn_fwd(proj_qkv, mask, train)
 
+# TODO XXX: This is placeholder
+# 1. Code up Jacobian for bmm (which we effective use by calling t_proj_fwd)
+# 2. There are some bugs in t_scaled_dot_prod_attn_bkwd when using diff/more dimensions
+def t_tlayer_attn_heads_bkwd_p(layer_params, qkv, mask, train): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
+    from torch.func import jacrev
+    from functools import partial 
+    fn = partial(t_tlayer_attn_heads_fwd, mask=mask, train=False)
+    return jacrev(fn)(layer_params, qkv)
+    return res
+
+# TODO XXX: same TODO as above
+def t_tlayer_attn_heads_bkwd_x(layer_params, qkv, mask, train): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
+    from torch.func import jacrev
+    from functools import partial 
+    fn = partial(t_tlayer_attn_heads_fwd, mask=mask, train=False)
+    return jacrev(fn, argnums=1)(layer_params, qkv)
+
 def t_tlayer_attn_fwd(layer_params, qkv, mask, train): # input: batch_size x seq_len x emb_dim
-    num_heads = layer_params[0].shape[0]
     heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train)
-    attn = torch.concatenate(torch.unbind(heads_attns, -3), axis=-1) # TODO XXX XXX: there is probably better way to go from [K, M, N] -> [M, K*N]. Or modify VMAP to return diff shape
+    BS, H, N, D = heads_attns.shape
+    attn = heads_attns.transpose(-2, -3).reshape((BS, N, -1))
     return t_proj_fwd(layer_params[-1], attn)
 
 def t_tlayer_ffn_fwd(layer_params, x, activation_fn): # input: seq_len x emb_dim
