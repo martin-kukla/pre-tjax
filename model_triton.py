@@ -204,6 +204,33 @@ def t_tlayer_attn_fwd(layer_params, qkv, mask, train): # input: batch_size x seq
     attn = heads_attns.transpose(-2, -3).reshape((BS, N, -1))
     return t_proj_fwd(layer_params[-1], attn)
 
+# TODO XXX: WIP make it work for H>1
+def t_tlayer_attn_bkwd_p(layer_params, qkv, mask, train): # input: batch_size x seq_len x emb_dim
+    f_out = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train)
+    BS, H, N, D = f_out.shape
+    g_in = f_out.transpose(-2, -3).reshape((BS, N, -1))
+    jac_g_x = t_proj_bkwd_x(layer_params[-1], g_in)
+    jac_g_p = t_proj_bkwd_p(layer_params[-1], g_in)
+    
+    f_out_size = f_out.numel()
+    jac_f = t_tlayer_attn_heads_bkwd_p(layer_params[0], qkv, mask, train)
+    jac_p0 = torch.matmul(jac_g_x.reshape((-1, f_out_size)), jac_f.reshape(f_out_size, -1))
+    return jac_p0.reshape(g_in.shape + layer_params[0].shape), jac_g_p
+
+# TODO XXX: WIP make it work for H>1
+def t_tlayer_attn_bkwd_x(layer_params, qkv, mask, train): # input: batch_size x seq_len x emb_dim
+    f_out = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train)
+    BS, H, N, D = f_out.shape
+    g_in = f_out.transpose(-2, -3).reshape((BS, N, -1))
+    jac_g_x = t_proj_bkwd_x(layer_params[-1], g_in)
+    
+    f_out_size = f_out.numel()
+    jac_f_x = t_tlayer_attn_heads_bkwd_x(layer_params[0], qkv, mask, train)
+    
+    # TODO XXX: vectorize?
+    js = [torch.matmul(jac_g_x.reshape((-1, f_out_size)), j.reshape(f_out_size, -1)) for j in jac_f_x]
+    return tuple([j.reshape(g_in.shape + qkv[0].shape) for j in js])
+
 def t_tlayer_ffn_fwd(layer_params, x, activation_fn): # input: seq_len x emb_dim
     x = t_linear_fwd((layer_params[0], layer_params[1]), x)
     x = activation_fn(x)
