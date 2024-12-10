@@ -87,25 +87,35 @@ def t_proj_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params, -2, -1)) # since layer_params is ... x output_dim x emb_dim
 
 def t_proj_bkwd_p(layer_params, x): # input: seq_len x emb_dim
+    indims = x.shape
+    x = x.reshape((-1, x.shape[-1]))
+    
     BS, N = x.shape
-    outdim = layer_params.shape[0]
+    outdim = layer_params.shape[-2]
 
     jac = x.unsqueeze(1).expand(BS, outdim, N)
     jac = jac.unsqueeze(-2).expand(BS, outdim, outdim, N)
     
     aux = torch.eye(outdim, device=x.device).unsqueeze(-1).expand(outdim, outdim, N)
     aux = aux.unsqueeze(0).expand(BS, outdim, outdim, N)
-    return jac*aux
+    
+    outdims = indims[:-1] + (outdim, )
+    return (jac*aux).reshape(outdims + layer_params.shape)
 
 def t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
+    indims = x.shape
+    x = x.reshape((-1, x.shape[-1]))
+    
     BS, N = x.shape
-    outdim = layer_params.shape[0]
+    outdim = layer_params.shape[-2]
     jac = layer_params.unsqueeze(0).expand(BS, outdim, N)
     jac = jac.unsqueeze(-2).expand(BS, outdim, BS, N)
     
     aux = torch.eye(BS, device=x.device).unsqueeze(1).expand(BS, outdim, BS)
     aux = aux.unsqueeze(-1).expand(BS, outdim, BS, N)
-    return jac*aux
+    
+    outdims = indims[:-1] + (outdim, )
+    return (jac*aux).reshape(outdims + indims)
 
 # TODO XXX: WIP
 def t_softmax_attn_fwd(q, k, mask, train):
@@ -123,7 +133,7 @@ def t_softmax_attn_bkwd(q, k, mask, train):
     attn = torch.matmul(q, torch.transpose(k, -2, -1))
     attn = attn / math.sqrt(D)
     attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
-    softmaxed_attn = torch.exp(t_log_softmax_fwd(attn))
+    softmaxed_attn = torch.exp(t_log_softmax_fwd(attn)) # TODO XXX: numerical stability
     softmaxed_attn = t_dropout(softmaxed_attn, train)
     
     d_dropout_dx = 1 #0.9 # TODO: XXX add proper dropout 
