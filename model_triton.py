@@ -335,6 +335,18 @@ def t_gpt2_tlayer_sublock1_bkwd_p(layer_params, y, mask, train=True): # input: s
     jac_tlayer_attn_x = torch.stack(jac_tlayer_attn_x)
     jac_layernorm_p = [torch.einsum("xabcdef, defg->abcg", jac_tlayer_attn_x, j) for j in jac_layernorm_p]
     return tuple(jac_layernorm_p) + jac_tlayer_attn_p
+
+def t_gpt2_tlayer_sublock1_bkwd_x(layer_params, y, mask, train=True): # input: seq_len x emb_dim
+    y_diff = t_layernorm_fwd(layer_params[:2], y)
+    jac_layernorm_x = t_layernorm_bkwd_x(layer_params[:2], y)
+    y = y + t_dropout(t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train), train)
+    # TODO XXX: add dropout!
+    jac_tlayer_attn_x = t_tlayer_attn_bkwd_x(layer_params[2:], (y_diff, y_diff, y_diff), mask, train)
+    
+    jac_y = torch.eye(y.numel(), device=y.device)    
+    jac_tlayer_attn_x = torch.stack(jac_tlayer_attn_x)
+    jac_y_diff = torch.einsum("xabcdef, defghi->abcghi", jac_tlayer_attn_x, jac_layernorm_x)
+    return jac_y.reshape(jac_y_diff.shape)[None, ] + jac_y_diff
     
 def t_gpt2_tlayer_sublock2_fwd(layer_params, y, train=True):
     y_diff = t_layernorm_fwd(layer_params[:-4], y)
