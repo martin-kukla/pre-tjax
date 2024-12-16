@@ -277,16 +277,16 @@ def t_layernorm_fwd(layer_params, x):
     return torch.multiply(normalized_x, layer_params[0][None, :]) + layer_params[1][None, :] # since both layer_params are output_dim x
 
 def t_layernorm_bkwd_p(layer_params, x):
-    x_indim = x.shape[0]
+    x_indims = x.shape
     N = x.shape[-1]
     outdim=layer_params[1].shape[0]
     
     
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims=True)
-    jac1 = ((x-x_mean)/x_std).unsqueeze(-1).repeat(1,1, N)
+    jac1 = ((x-x_mean)/x_std).unsqueeze(-1).expand(x_indims + (N, ))
     jac1_aux = torch.eye(N, device=x.device) # just used for reshaping
-    jac2 = torch.eye(outdim).expand((x_indim, outdim, outdim))
+    jac2 = torch.eye(outdim).expand(x_indims[:-1] + (outdim, outdim))
     return jac1 *jac1_aux, jac2
 
 def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
@@ -311,7 +311,9 @@ def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
     return torch.block_diag(*jac.unbind(0)).reshape(BS, N, BS, N)
 
 def t_layernorm_bkwd_x(layer_params, x):
-    return (layer_params[0] * normalized_x_bkwd(x)).transpose(-3,-1)
+    x_2d = x.reshape((-1, x.shape[-1]))
+    jac_x_2d = (layer_params[0] * normalized_x_bkwd(x_2d)).transpose(-3,-1)
+    return jac_x_2d.reshape(x.shape + x.shape)
 
 def t_tlayer_fwd_gpt2(layer_params, y, mask, train=True): # input: seq_len x emb_dim
 
