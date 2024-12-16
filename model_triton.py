@@ -290,7 +290,7 @@ def t_layernorm_bkwd_p(layer_params, x):
     x_std = torch.std(x, axis=-1, keepdims=True)
     jac1 = ((x-x_mean)/x_std).unsqueeze(-1).expand(x_indims + (N, ))
     jac1_aux = torch.eye(N, device=x.device) # just used for reshaping
-    jac2 = torch.eye(outdim).expand(x_indims[:-1] + (outdim, outdim))
+    jac2 = torch.eye(outdim, device=x.device).expand(x_indims[:-1] + (outdim, outdim))
     return jac1 *jac1_aux, jac2
 
 def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
@@ -323,6 +323,18 @@ def t_gpt2_tlayer_sublock1_fwd(layer_params, y, mask, train=True):
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     y = y + t_dropout(t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train), train)
     return y
+
+def t_gpt2_tlayer_sublock1_bkwd_p(layer_params, y, mask, train=True): # input: seq_len x emb_dim
+    y_diff = t_layernorm_fwd(layer_params[:2], y)
+    jac_layernorm_p = t_layernorm_bkwd_p(layer_params[:2], y)
+    y = y + t_dropout(t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train), train)
+    # TODO XXX: add dropout!
+    jac_tlayer_attn_p = t_tlayer_attn_bkwd_p(layer_params[2:], (y_diff, y_diff, y_diff), mask, train)
+    jac_tlayer_attn_x = t_tlayer_attn_bkwd_x(layer_params[2:], (y_diff, y_diff, y_diff), mask, train)
+    
+    jac_tlayer_attn_x = torch.stack(jac_tlayer_attn_x)
+    jac_layernorm_p = [torch.einsum("xabcdef, defg->abcg", jac_tlayer_attn_x, j) for j in jac_layernorm_p]
+    return tuple(jac_layernorm_p) + jac_tlayer_attn_p
     
 def t_gpt2_tlayer_sublock2_fwd(layer_params, y, train=True):
     y_diff = t_layernorm_fwd(layer_params[:-4], y)
