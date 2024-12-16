@@ -238,31 +238,35 @@ def t_tlayer_ffn_fwd(layer_params, x, activation_fn): # input: seq_len x emb_dim
     return x
 
 def t_tlayer_ffn_bkwd_p(layer_params, x, activation_fn):
+    x_2d = x.reshape((-1, x.shape[-1]))
+    
     act_fn_bkwd = t_gelu_bkwd if activation_fn==t_gelu_fwd else t_relu_bkwd
     
-    jac1 = t_linear_bkwd_p((layer_params[0], layer_params[1]), x)
-    x = t_linear_fwd((layer_params[0], layer_params[1]), x)
-    dact_dx = act_fn_bkwd(x)
-    x = activation_fn(x)
-    jac2 = t_linear_bkwd_p((layer_params[2], layer_params[3]), x)
-    dffn2_dx = t_linear_bkwd_x((layer_params[2], layer_params[3]), x)
+    jac1 = t_linear_bkwd_p((layer_params[0], layer_params[1]), x_2d)
+    x_2d = t_linear_fwd((layer_params[0], layer_params[1]), x_2d)
+    dact_dx = act_fn_bkwd(x_2d)
+    x_2d = activation_fn(x_2d)
+    jac2 = t_linear_bkwd_p((layer_params[2], layer_params[3]), x_2d)
+    dffn2_dx = t_linear_bkwd_x((layer_params[2], layer_params[3]), x_2d)
     dffn2_act_dx = dact_dx * dffn2_dx #Note dact_dx is only 2D, but torch will add other dims
     jac1 = (torch.einsum('abcd,cdef->abef', dffn2_act_dx, jac1[0]),
             torch.einsum('abcd,cdf->abf', dffn2_act_dx, jac1[1]))
-    return jac1[0], jac1[1], jac2[0], jac2[1]
+    
+    return [j.reshape(x.shape+p.shape) for j, p in zip(jac1+jac2, layer_params)]
 
-# TODO XXX: rethink design of bkwd_p being split from bkwd_x - they do the same computation
 def t_tlayer_ffn_bkwd_x(layer_params, x, activation_fn):
+    x_2d = x.reshape((-1, x.shape[-1]))
+    
     act_fn_bkwd = t_gelu_bkwd if activation_fn==t_gelu_fwd else t_relu_bkwd
     
-    dffn1_dx = t_linear_bkwd_x((layer_params[0], layer_params[1]), x)
-    x = t_linear_fwd((layer_params[0], layer_params[1]), x)
-    dact_dx = act_fn_bkwd(x)
-    x = activation_fn(x)
-    dffn2_dx = t_linear_bkwd_x((layer_params[2], layer_params[3]), x)
+    dffn1_dx = t_linear_bkwd_x((layer_params[0], layer_params[1]), x_2d)
+    x_2d = t_linear_fwd((layer_params[0], layer_params[1]), x_2d)
+    dact_dx = act_fn_bkwd(x_2d)
+    x_2d = activation_fn(x_2d)
+    dffn2_dx = t_linear_bkwd_x((layer_params[2], layer_params[3]), x_2d)
     dffn2_act_dx = dact_dx * dffn2_dx #Note dact_dx is only 2D, but torch will add other dims
     jac = torch.einsum('abcd,cdef->abef', dffn2_act_dx, dffn1_dx)
-    return jac
+    return jac.reshape(x.shape+x.shape)
 
 def t_dropout(x, train=True):
     if not train: # As we jit the whole loss/inference, the train param is known at tracing time.
