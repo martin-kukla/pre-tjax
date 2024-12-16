@@ -346,7 +346,7 @@ def t_gpt2_tlayer_sublock1_bkwd_x(layer_params, y, mask, train=True): # input: s
     jac_y = torch.eye(y.numel(), device=y.device)    
     jac_tlayer_attn_x = torch.stack(jac_tlayer_attn_x)
     jac_y_diff = torch.einsum("xabcdef, defghi->abcghi", jac_tlayer_attn_x, jac_layernorm_x)
-    return jac_y.reshape(jac_y_diff.shape)[None, ] + jac_y_diff
+    return jac_y.reshape(jac_y_diff.shape) + jac_y_diff
     
 def t_gpt2_tlayer_sublock2_fwd(layer_params, y, train=True):
     y_diff = t_layernorm_fwd(layer_params[:-4], y)
@@ -379,6 +379,29 @@ def t_gpt2_tlayer_fwd(layer_params, y, mask, train=True): # input: seq_len x emb
     y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train)
     y = t_gpt2_tlayer_sublock2_fwd(layer_params[-6:], y, train)
     return y
+
+def t_tlayer_fwd_gpt2_bkwd_p(layer_params, y, mask, train=True): # input: seq_len x emb_dim
+    jac_subblock1_p = t_gpt2_tlayer_sublock1_bkwd_p(layer_params[:-6], y, mask, train)
+    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train)
+    jac_subblock2_p = t_gpt2_tlayer_sublock2_bkwd_p(layer_params[-6:], y, train)
+    jac_subblock2_x = t_gpt2_tlayer_sublock2_bkwd_x(layer_params[-6:], y, train)
+    
+    jac_subblock2_x_2d = jac_subblock2_x.reshape((y.numel(), y.numel()))
+    def mult_j_in_2d(j): # we need to do it u
+        j = j.flatten(end_dim=len(y.shape)-1) #TODO XXX: is there a nice way of coding it?
+        j_indim = j.shape[1:]
+        j = j.reshape((y.numel(), -1))
+        res = torch.matmul(jac_subblock2_x_2d, j)
+        return res.reshape(y.shape + j_indim)
+    jac_subblock1_p = [mult_j_in_2d(j) for j in jac_subblock1_p] # we need to do it as js are of diff. D
+    return tuple(jac_subblock1_p) + jac_subblock2_p
+
+def t_tlayer_fwd_gpt2_bkwd_x(layer_params, y, mask, train=True): # input: seq_len x emb_dim
+    jac_subblock1_x = t_gpt2_tlayer_sublock1_bkwd_x(layer_params[:-6], y, mask, train)
+    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train)
+    jac_subblock2_x = t_gpt2_tlayer_sublock2_bkwd_x(layer_params[-6:], y, train)
+      
+    return torch.einsum('abcdef, defghi->abcghi', jac_subblock2_x, jac_subblock1_x)
 
 def t_gpt2_tlayers_fwd(params, y, mask, indices, train=True): # input: seq_len x
     y = t_embed_fwd(params[0], y)
