@@ -353,6 +353,28 @@ def t_gpt2_tlayer_sublock2_fwd(layer_params, y, train=True):
     y = y + t_dropout(t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu_fwd), train)
     return y
 
+def t_gpt2_tlayer_sublock2_bkwd_p(layer_params, y, train=True): # input: seq_len x emb_dim
+    y_diff = t_layernorm_fwd(layer_params[:2], y)
+    jac_layernorm_p = t_layernorm_bkwd_p(layer_params[:2], y)
+    y = y + t_dropout(t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd), train)
+    # TODO XXX: add dropout!
+    jac_tlayer_ffn_p = t_tlayer_ffn_bkwd_p(layer_params[2:], y_diff, t_gelu_fwd)
+    jac_tlayer_ffn_x = t_tlayer_ffn_bkwd_x(layer_params[2:], y_diff, t_gelu_fwd)
+    
+    jac_layernorm_p = [torch.einsum("abcdef, defg->abcg", jac_tlayer_ffn_x, j) for j in jac_layernorm_p]
+    return tuple(jac_layernorm_p + jac_tlayer_ffn_p)
+
+def t_gpt2_tlayer_sublock2_bkwd_x(layer_params, y, train=True): # input: seq_len x emb_dim
+    y_diff = t_layernorm_fwd(layer_params[:2], y)
+    jac_layernorm_x = t_layernorm_bkwd_x(layer_params[:2], y)
+    y = y + t_dropout(t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd), train)
+    # TODO XXX: add dropout!
+    jac_tlayer_ffn_x = t_tlayer_ffn_bkwd_x(layer_params[2:], y_diff, t_gelu_fwd)
+    
+    jac_y = torch.eye(y.numel(), device=y.device)    
+    jac_y_diff = torch.einsum("abcdef, defghi->abcghi", jac_tlayer_ffn_x, jac_layernorm_x)
+    return jac_y.reshape(jac_y_diff.shape) + jac_y_diff
+
 def t_gpt2_tlayer_fwd(layer_params, y, mask, train=True): # input: seq_len x emb_dim
     y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train)
     y = t_gpt2_tlayer_sublock2_fwd(layer_params[-6:], y, train)
