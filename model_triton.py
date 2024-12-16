@@ -319,31 +319,37 @@ def t_layernorm_bkwd_x(layer_params, x):
     jac_x_2d = (layer_params[0] * normalized_x_bkwd(x_2d)).transpose(-3,-1)
     return jac_x_2d.reshape(x.shape + x.shape)
 
-def t_tlayer_fwd_gpt2(layer_params, y, mask, train=True): # input: seq_len x emb_dim
-
+def t_gpt2_tlayer_sublock1_fwd(layer_params, y, mask, train=True):
     y_diff = t_layernorm_fwd(layer_params[:2], y)
-    y = y + t_dropout(t_tlayer_attn_fwd(layer_params[2:-6], (y_diff, y_diff, y_diff), mask, train), train)
-
-    y_diff = t_layernorm_fwd(layer_params[-6:-4], y)
+    y = y + t_dropout(t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train), train)
+    return y
+    
+def t_gpt2_tlayer_sublock2_fwd(layer_params, y, train=True):
+    y_diff = t_layernorm_fwd(layer_params[:-4], y)
     y = y + t_dropout(t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu_fwd), train)
     return y
 
-def t_tlayers_fwd_gpt2(params, y, mask, indices, train=True): # input: seq_len x
+def t_gpt2_tlayer_fwd(layer_params, y, mask, train=True): # input: seq_len x emb_dim
+    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train)
+    y = t_gpt2_tlayer_sublock2_fwd(layer_params[-6:], y, train)
+    return y
+
+def t_gpt2_tlayers_fwd(params, y, mask, indices, train=True): # input: seq_len x
     y = t_embed_fwd(params[0], y)
     y = t_dropout(y + params[1][0], train)
     
     for layer_params in params[2:-1]:
-        y = t_tlayer_fwd_gpt2(layer_params, y, mask, train)
+        y = t_gpt2_tlayer_fwd(layer_params, y, mask, train)
     y = t_layernorm_fwd(params[-1], y)
 
     return y
 
-def t_forward_gpt2(params, y, y_mask, y_indices, train): # input: seq_len x
-    y = t_tlayers_fwd_gpt2(params, y, y_mask, y_indices, train=train)
+def t_gpt2_forward(params, y, y_mask, y_indices, train): # input: seq_len x
+    y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train=train)
     
     y = t_linear_fwd(params[0], y) 
     return y
 
 
 #t_batched_forward_gpt2 = torch.vmap(t_forward_gpt2, in_dims=(None, 0, 0, 0, None), randomness="different") # TODO XXX: output will be batched unlike JAX's vmap
-t_batched_forward_gpt2 = t_forward_gpt2
+t_batched_forward_gpt2 = t_gpt2_forward # TODO XXX: rename the left one too
