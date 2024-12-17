@@ -415,6 +415,50 @@ def t_gpt2_tlayers_fwd(params, y, mask, indices, train=True): # input: seq_len x
 
     return y
 
+def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True): # input: seq_len x
+    indices = torch.arange(y.shape[1], device=y.device).unsqueeze(0).expand(*y.shape) # we ignore indices arg
+    jac_embed = t_embed_bkwd(params[0], y)
+    # Due to tying of embedding and final projection layers,
+    # we need to fill zeroed gradient with respect to biases:
+    jac_embed = [jac_embed[0], torch.zeros(jac_embed[0].shape[:-1], device=y.device)]
+    y = t_embed_fwd(params[0], y)
+    # Reuse t_embed_bkwd to compute jacobian of pos_encoding
+    # Need to account for lack of  1/ sqrt(emb_dim)
+    jac_pos_enc = t_embed_bkwd(params[1], indices) 
+    jac_pos_enc = [jac_pos_enc[0] / params[1][0].shape[1] * 2, ]
+    # TODO XXX: add dropout
+    y = t_dropout(y + params[1][0], train)
+    
+    layers_jacs_p = []
+    layers_jacs_x = []
+    
+    for layer_params in params[2:-1]:
+        layers_jacs_p.append(t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train))
+        layers_jacs_x.append(t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train))
+        y = t_gpt2_tlayer_fwd(layer_params, y, mask, train)
+    jac_layernorm_p = t_layernorm_bkwd_p(params[-1], y)
+    jac_layernorm_x = t_layernorm_bkwd_x(params[-1], y)    
+    y = t_layernorm_fwd(params[-1], y)
+    
+    # Propoagate back
+    def mult_j_in_2d(j_left_2d, j): # we need to do it u
+        j = j.flatten(end_dim=len(y.shape)-1) #TODO XXX: is there a nice way of coding it?
+        j_indim = j.shape[1:]
+        j = j.reshape((y.numel(), -1))
+        res = torch.matmul(j_left_2d, j)
+        return res.reshape(y.shape + j_indim)
+    layers_jacs_x[-1]=torch.einsum('abcdef, defghi -> abcghi', jac_layernorm_x, layers_jacs_x[-1])
+    jac_layernorm_x_2d = jac_layernorm_x.reshape((y.numel(), y.numel()))
+    layers_jacs_p[-1] = [mult_j_in_2d(jac_layernorm_x_2d, j) for j in layers_jacs_p[-1]] 
+    for i in reversed(range(1, len(layers_jacs_p))):
+        layers_jacs_x[i-1]=torch.einsum('abcdef, defghi -> abcghi',layers_jacs_x[i], layers_jacs_x[i-1])
+        jac_layer_2d = layers_jacs_x[i].reshape((y.numel(), y.numel()))
+        layers_jacs_p[i-1] = [mult_j_in_2d(jac_layer_2d, j) for j in layers_jacs_p[i-1]] 
+    jac_pos_enc[0] =torch.einsum('abcdef, defgh -> abcgh', layers_jacs_x[0], jac_pos_enc[0])
+    jac_embed[0] = torch.einsum('abcdef, defgh -> abcgh', layers_jacs_x[0], jac_embed[0])
+
+    return tuple([jac_embed, jac_pos_enc] + layers_jacs_p + [jac_layernorm_p])
+
 def t_gpt2_forward(params, y, y_mask, y_indices, train): # input: seq_len x
     y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train=train)
     
