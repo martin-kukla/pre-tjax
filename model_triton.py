@@ -41,16 +41,18 @@ def t_embed_fwd(layer_params, x): # input: 1 x
     return layer_params[0][x] * math.sqrt(layer_params[0].shape[1]) # since layer_params[0] is vocab_size x emb_dim
 
 def t_embed_bkwd(layer_params, x): # input: 1 x
+    x_1d = x.reshape(-1)
+    
     emb_size = layer_params[0].shape[1]    
     fn_outdim = torch.numel(x) * emb_size
     fn_indim =  torch.numel(layer_params[0]) # jacobian with respect to params
     jac = torch.zeros(fn_outdim, fn_indim, device=x.device)
     
     indices = torch.tile(torch.arange(emb_size, device=x.device), (x.numel(), 1))
-    indices = ((x * emb_size).unsqueeze(1) + indices).reshape(-1, 1)
+    indices = ((x_1d * emb_size).unsqueeze(1) + indices).reshape(-1, 1)
     jac.scatter_(1, indices, math.sqrt(emb_size))
     
-    return (jac.reshape(torch.numel(x), emb_size, layer_params[0].shape[0], layer_params[0].shape[1]), )
+    return (jac.reshape( x.shape + (emb_size, layer_params[0].shape[0], layer_params[0].shape[1])), )
 
 def t_relu_fwd(x):
     return torch.where(torch.le(x, 0), 0, x) # as inputs are broadcastable in where&le - follows pytorch's implementation
@@ -380,7 +382,7 @@ def t_gpt2_tlayer_fwd(layer_params, y, mask, train=True): # input: seq_len x emb
     y = t_gpt2_tlayer_sublock2_fwd(layer_params[-6:], y, train)
     return y
 
-def t_tlayer_fwd_gpt2_bkwd_p(layer_params, y, mask, train=True): # input: seq_len x emb_dim
+def t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train=True): # input: seq_len x emb_dim
     jac_subblock1_p = t_gpt2_tlayer_sublock1_bkwd_p(layer_params[:-6], y, mask, train)
     y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train)
     jac_subblock2_p = t_gpt2_tlayer_sublock2_bkwd_p(layer_params[-6:], y, train)
@@ -396,7 +398,7 @@ def t_tlayer_fwd_gpt2_bkwd_p(layer_params, y, mask, train=True): # input: seq_le
     jac_subblock1_p = [mult_j_in_2d(j) for j in jac_subblock1_p] # we need to do it as js are of diff. D
     return tuple(jac_subblock1_p) + jac_subblock2_p
 
-def t_tlayer_fwd_gpt2_bkwd_x(layer_params, y, mask, train=True): # input: seq_len x emb_dim
+def t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train=True): # input: seq_len x emb_dim
     jac_subblock1_x = t_gpt2_tlayer_sublock1_bkwd_x(layer_params[:-6], y, mask, train)
     y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train)
     jac_subblock2_x = t_gpt2_tlayer_sublock2_bkwd_x(layer_params[-6:], y, train)
