@@ -388,14 +388,7 @@ def t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train=True): # input: seq_len x 
     jac_subblock2_p = t_gpt2_tlayer_sublock2_bkwd_p(layer_params[-6:], y, train)
     jac_subblock2_x = t_gpt2_tlayer_sublock2_bkwd_x(layer_params[-6:], y, train)
     
-    jac_subblock2_x_2d = jac_subblock2_x.reshape((y.numel(), y.numel()))
-    def mult_j_in_2d(j): # we need to do it u
-        j = j.flatten(end_dim=len(y.shape)-1) #TODO XXX: is there a nice way of coding it?
-        j_indim = j.shape[1:]
-        j = j.reshape((y.numel(), -1))
-        res = torch.matmul(jac_subblock2_x_2d, j)
-        return res.reshape(y.shape + j_indim)
-    jac_subblock1_p = [mult_j_in_2d(j) for j in jac_subblock1_p] # we need to do it as js are of diff. D
+    jac_subblock1_p = _mult_jacs_in_2d(jac_subblock2_x, jac_subblock1_p, y)
     return tuple(jac_subblock1_p) + jac_subblock2_p
 
 def t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train=True): # input: seq_len x emb_dim
