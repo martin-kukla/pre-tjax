@@ -415,6 +415,18 @@ def t_gpt2_tlayers_fwd(params, y, mask, indices, train=True): # input: seq_len x
 
     return y
 
+# Multiplies (in 2D) left Jacobian against the PyTree of right Jacobians
+# Uses y for doing reshapes to 2D correctly, but probably one doesn't need it
+def _mult_jacs_in_2d(j_left, j_right_tree, y):
+    def mult_j_in_2d(j_left_2d, j): # we need to do it u
+        j = j.flatten(end_dim=len(y.shape)-1) #TODO XXX: is there a nice way of coding it?
+        j_indim = j.shape[1:]
+        j = j.reshape((y.numel(), -1))
+        res = torch.matmul(j_left_2d, j)
+        return res.reshape(y.shape + j_indim)
+    j_left_2d = j_left.reshape((y.numel(), y.numel()))
+    return [mult_j_in_2d(j_left_2d, j) for j in j_right_tree] 
+
 def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True): # input: seq_len x
     indices = torch.arange(y.shape[1], device=y.device).unsqueeze(0).expand(*y.shape) # we ignore indices arg
     jac_embed = t_embed_bkwd(params[0], y)
@@ -441,19 +453,11 @@ def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True): # input: seq_le
     y = t_layernorm_fwd(params[-1], y)
     
     # Propoagate back
-    def mult_j_in_2d(j_left_2d, j): # we need to do it u
-        j = j.flatten(end_dim=len(y.shape)-1) #TODO XXX: is there a nice way of coding it?
-        j_indim = j.shape[1:]
-        j = j.reshape((y.numel(), -1))
-        res = torch.matmul(j_left_2d, j)
-        return res.reshape(y.shape + j_indim)
     layers_jacs_x[-1]=torch.einsum('abcdef, defghi -> abcghi', jac_layernorm_x, layers_jacs_x[-1])
-    jac_layernorm_x_2d = jac_layernorm_x.reshape((y.numel(), y.numel()))
-    layers_jacs_p[-1] = [mult_j_in_2d(jac_layernorm_x_2d, j) for j in layers_jacs_p[-1]] 
+    layers_jacs_p[-1] = _mult_jacs_in_2d(jac_layernorm_x, layers_jacs_p[-1], y)
     for i in reversed(range(1, len(layers_jacs_p))):
         layers_jacs_x[i-1]=torch.einsum('abcdef, defghi -> abcghi',layers_jacs_x[i], layers_jacs_x[i-1])
-        jac_layer_2d = layers_jacs_x[i].reshape((y.numel(), y.numel()))
-        layers_jacs_p[i-1] = [mult_j_in_2d(jac_layer_2d, j) for j in layers_jacs_p[i-1]] 
+        layers_jacs_p[i-1] = _mult_jacs_in_2d(layers_jacs_x[i], layers_jacs_p[i-1], y)
     jac_pos_enc[0] =torch.einsum('abcdef, defgh -> abcgh', layers_jacs_x[0], jac_pos_enc[0])
     jac_embed[0] = torch.einsum('abcdef, defgh -> abcgh', layers_jacs_x[0], jac_embed[0])
 
