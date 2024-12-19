@@ -408,16 +408,19 @@ def t_gpt2_tlayers_fwd(params, y, mask, indices, train=True): # input: seq_len x
 
     return y
 
-# Multiplies (in 2D) left Jacobian against the PyTree of right Jacobians
+# Multiplies (in 2D) left Jacobian against the nested list of right Jacobians
 # Uses y for doing reshapes to 2D correctly, but probably one doesn't need it
-def _mult_jacs_in_2d(j_left, j_right_tree, y):
+# TODO XXX: func should support PyTree at right
+def _mult_jacs_in_2d(j_left, j_right_tree, y_in):
+    # As j_left.shape = y_out.shape + y_in.shape
+    y_out_shape = j_left.flatten(start_dim=-len(y_in.shape)).shape[:-1]
+    
     def mult_j_in_2d(j_left_2d, j): # we need to do it u
-        j = j.flatten(end_dim=len(y.shape)-1) #TODO XXX: is there a nice way of coding it?
-        j_indim = j.shape[1:]
-        j = j.reshape((y.numel(), -1))
-        res = torch.matmul(j_left_2d, j)
-        return res.reshape(y.shape + j_indim)
-    j_left_2d = j_left.reshape((y.numel(), y.numel()))
+        # As j.shape = y_in.shape + j_in.shape
+        j_in_shape = j.flatten(end_dim=len(y_in.shape)-1).shape[1:]
+        j_2d = j.reshape((y_in.numel(), -1))
+        return torch.matmul(j_left_2d, j_2d).reshape(y_out_shape + j_in_shape)
+    j_left_2d = j_left.reshape((-1, y_in.numel()))
     return [mult_j_in_2d(j_left_2d, j) for j in j_right_tree] 
 
 def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True): # input: seq_len x
@@ -461,6 +464,21 @@ def t_gpt2_forward(params, y, y_mask, y_indices, train): # input: seq_len x
     
     y = t_linear_fwd(params[0], y) 
     return y
+
+def t_gpt2_bkwd_p(params, y, y_mask, y_indices, train): # input: seq_len x
+    jac = t_gpt2_tlayers_bkwd_p(params, y, y_mask, y_indices, train=train)
+    y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train=train)
+    
+    jac_linear_x = t_linear_bkwd_x(params[0], y) 
+    jac_linear_p = t_linear_bkwd_p(params[0], y)    
+    
+    jac = list(jac)
+    for i in range(len(jac)):
+        jac[i] = _mult_jacs_in_2d(jac_linear_x, jac[i], y)
+    
+    # As we tie embedding and last projection weights
+    jac[0] = (jac[0][0] + jac_linear_p[0], jac[0][1] + jac_linear_p[1])
+    return tuple(jac)
 
 
 #t_batched_forward_gpt2 = torch.vmap(t_forward_gpt2, in_dims=(None, 0, 0, 0, None), randomness="different") # TODO XXX: output will be batched unlike JAX's vmap
