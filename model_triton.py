@@ -88,7 +88,12 @@ def t_linear_bkwd_x(layer_params, x): # input: seq_len x emb_dim
 def t_proj_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params, -2, -1)) # since layer_params is ... x output_dim x emb_dim
 
+# TODO XXX: Placebolder. Code up Jacobian for bmm
 def t_proj_bkwd_p(layer_params, x): # input: seq_len x emb_dim
+    from torch.func import jacrev
+    return jacrev(t_proj_fwd)(layer_params, x)
+    
+def my_t_proj_bkwd_p(layer_params, x): # input: seq_len x emb_dim
     indims = x.shape
     x = x.reshape((-1, x.shape[-1]))
     
@@ -104,7 +109,12 @@ def t_proj_bkwd_p(layer_params, x): # input: seq_len x emb_dim
     outdims = indims[:-1] + (outdim, )
     return (jac*aux).reshape(outdims + layer_params.shape)
 
+# TODO XXX: Placebolder. Code up Jacobian for bmm
 def t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
+    from torch.func import jacrev
+    return jacrev(t_proj_fwd, argnums=1)(layer_params, x)
+
+def my_t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
     indims = x.shape
     x = x.reshape((-1, x.shape[-1]))
     
