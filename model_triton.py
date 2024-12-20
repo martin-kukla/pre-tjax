@@ -181,7 +181,7 @@ def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True): # inputs: batch_size x h
         
         # TODO XXX: Clean up these reshapes
         jac_a = torch.matmul(v_2d.transpose(1, 0), A_4d.transpose(1, 0).reshape(v_2d.shape[0], -1))
-        jac_ = jac_a.reshape(jac_a.shape[0], -1, v_2d.numel()).transpose(1, 0)
+        jac_a = jac_a.reshape(jac_a.shape[0], -1, v_2d.numel()).transpose(1, 0)
         return jac_a
     
     jac_q = mult_with_v_2d_bkwd(dsoftmaxed_attn_dq).reshape(v.shape + v.shape)
