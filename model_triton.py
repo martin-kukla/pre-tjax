@@ -159,9 +159,27 @@ def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True): # inputs: batch_size x he
     softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train)
     return torch.matmul(softmaxed_attn, v) # output: seq_len x emb_dim
 
+def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
+    BS, H, _, N, D = qkv.shape
+    q, k, v = torch.unbind(qkv, dim=2)
+    
+    sa = t_softmax_attn_fwd(q, k, mask, train)
+    jac_sa_q, jac_sa_k = t_softmax_attn_bkwd(q, k, mask, train)     
+    
+    # TODO XXX: code up jacobian for bmm
+    from torch.func import jacrev
+    bbm_fn = lambda m1, m2: torch.matmul(m1, m2)
+    jac_bmm_sa = jacrev(bbm_fn, argnums=0)(sa, v)
+    jac_v = jacrev(bbm_fn, argnums=1)(sa, v)
+    
+    jacs_q_k = _mult_jacs_in_2d(jac_bmm_sa, [jac_sa_q, jac_sa_k], q)   
+    
+    return jacs_q_k[0], jacs_q_k[1], jac_v
+
+# TODO XXX: Remove below
 # TODO XXX: Support for heads>1
 # TODO XXX: replace mult with the generic newer _mult
-def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
+def old_t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
     BS, H, _, N, D = qkv.shape
     q, k, v = torch.unbind(qkv, dim=2)
     
