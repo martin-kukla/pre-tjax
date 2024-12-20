@@ -154,15 +154,9 @@ def t_softmax_attn_bkwd(q, k, mask, train):
     jac2 = torch.matmul(q.transpose(-2,-1)/math.sqrt(D), dsoftmaxed_attn_dx).transpose(-2,-1)
     return jac1, jac2
 
-# TODO XXX: Use t_softmax_attn_fwd above?
 def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
     q, k, v = torch.unbind(qkv, dim=2)# batch_size x heads x seq_len x emb_dim
-    attn = torch.matmul(q, torch.transpose(k, -2, -1)) # seq_len(q) x seq_len(k)
-    attn = attn / math.sqrt(q.shape[-1]) # scale by sqrt(d_k)
-    #attn = jnp.where(mask, attn, jnp.full_like(attn, -jnp.inf))
-    attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
-    softmaxed_attn = torch.exp(t_log_softmax_fwd(attn))
-    softmaxed_attn = t_dropout(softmaxed_attn, train)
+    softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train)
     return torch.matmul(softmaxed_attn, v) # output: seq_len x emb_dim
 
 # TODO XXX: Support for heads>1
