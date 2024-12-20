@@ -155,6 +155,8 @@ def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True): # inputs: batch_size x he
     softmaxed_attn = t_dropout(softmaxed_attn, train)
     return torch.matmul(softmaxed_attn, v) # output: seq_len x emb_dim
 
+# TODO XXX: Support for heads>1
+# TODO XXX: replace mult with the generic newer _mult
 def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
     BS, H, _, N, D = qkv.shape
     q, k, v = torch.unbind(qkv, dim=2)
@@ -174,7 +176,15 @@ def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True): # inputs: batch_size x h
     
     jac_q = mult_with_v_2d_bkwd(dsoftmaxed_attn_dq).reshape(v.shape + v.shape)
     jac_k = mult_with_v_2d_bkwd(dsoftmaxed_attn_dk).reshape(v.shape + v.shape)
+    
     jac_v = softmaxed_attn
+    # TODO XXX: Fix this very ugly iterative reshape 
+    jac_v = jac_v.reshape((-1, ) + jac_v.shape[3:])
+    res = []
+    for it in jac_v:
+        res.append(torch.block_diag( *[it.unsqueeze(1)]*v.shape[-1]))
+    jac_v = torch.stack(res).reshape(v.shape + v.shape)
+    
     return jac_q, jac_k, jac_v
 
 def t_tlayer_attn_heads_fwd(layer_params, qkv, mask, train): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
@@ -191,7 +201,6 @@ def t_tlayer_attn_heads_bkwd_p(layer_params, qkv, mask, train): # params: heads 
     from functools import partial 
     fn = partial(t_tlayer_attn_heads_fwd, mask=mask, train=False)
     return jacrev(fn)(layer_params, qkv)
-    return res
 
 # TODO XXX: same TODO as above
 def t_tlayer_attn_heads_bkwd_x(layer_params, qkv, mask, train): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
