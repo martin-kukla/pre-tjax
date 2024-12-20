@@ -143,7 +143,7 @@ def t_softmax_attn_bkwd(q, k, mask, train):
     attn = torch.matmul(q, torch.transpose(k, -2, -1))
     attn = attn / math.sqrt(D)
     attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
-    # TODO XXX: would it cause numerical stabliity issues?
+    # TODO XXX: would the below line cause numerical stabliity issues?
     sa = torch.exp(t_log_softmax_fwd(attn)) 
     sa = t_dropout(sa, train)
     
@@ -169,10 +169,9 @@ def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True): # inputs: batch_size x h
     # TODO XXX: code up jacobian for bmm
     from torch.func import jacrev
     bbm_fn = lambda m1, m2: torch.matmul(m1, m2)
-    jac_bmm_sa = jacrev(bbm_fn, argnums=0)(sa, v)
-    jac_v = jacrev(bbm_fn, argnums=1)(sa, v)
+    jac_bmm_sa, jac_v = jacrev(bbm_fn, argnums=(0,1))(sa, v)
     
-    jacs_q_k = _mult_jacs_in_2d(jac_bmm_sa, [jac_sa_q, jac_sa_k], q)   
+    jacs_q_k = _mult_jacs_in_2d(jac_bmm_sa, [jac_sa_q, jac_sa_k], sa)   
     
     return jacs_q_k[0], jacs_q_k[1], jac_v
 
