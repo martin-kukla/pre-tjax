@@ -129,29 +129,29 @@ def my_t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
     outdims = indims[:-1] + (outdim, )
     return (jac*aux).reshape(outdims + indims)
 
-# TODO XXX: WIP
 def t_softmax_attn_fwd(q, k, mask, train):
     D = q.shape[-1]
     attn = torch.matmul(q, torch.transpose(k, -2, -1))
     attn = attn / math.sqrt(D)
     attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
-    softmaxed_attn = torch.exp(t_log_softmax_fwd(attn))
-    softmaxed_attn = t_dropout(softmaxed_attn, train)
-    return softmaxed_attn
+    sa = torch.exp(t_log_softmax_fwd(attn))
+    sa = t_dropout(sa, train)
+    return sa
 
-# TODO XXX: WIP 
 def t_softmax_attn_bkwd(q, k, mask, train):
     D = q.shape[-1]
     attn = torch.matmul(q, torch.transpose(k, -2, -1))
     attn = attn / math.sqrt(D)
     attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
-    softmaxed_attn = torch.exp(t_log_softmax_fwd(attn)) # TODO XXX: numerical stability
-    softmaxed_attn = t_dropout(softmaxed_attn, train)
+    # TODO XXX: would it cause numerical stabliity issues?
+    sa = torch.exp(t_log_softmax_fwd(attn)) 
+    sa = t_dropout(sa, train)
     
+    # TODO XXX: Clean up below..
     d_dropout_dx = 1 #0.9 # TODO: XXX add proper dropout 
-    dsoftmaxed_attn_dx = d_dropout_dx * softmaxed_attn[..., None, None, None, None] * t_log_softmax_bkwd(attn)
-    jac1 = torch.matmul(dsoftmaxed_attn_dx, k/math.sqrt(D))
-    jac2 = torch.matmul(q.transpose(-2,-1)/math.sqrt(D), dsoftmaxed_attn_dx).transpose(-2,-1)
+    jac_sa_x = d_dropout_dx * sa[..., None, None, None, None] * t_log_softmax_bkwd(attn)
+    jac1 = torch.matmul(jac_sa_x, k/math.sqrt(D))
+    jac2 = torch.matmul(q.transpose(-2,-1), jac_sa_x/math.sqrt(D)).transpose(-2,-1)
     return jac1, jac2
 
 def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
