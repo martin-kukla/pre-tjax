@@ -400,10 +400,15 @@ def t_gpt2_tlayer_sublock2_fwd(layer_params, y, train=True):
 def t_gpt2_tlayer_sublock2_bkwd_p(layer_params, y, train=True): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     jac_layernorm_p = t_layernorm_bkwd_p(layer_params[:2], y)
-    y = y + t_dropout_fwd(t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd), train)
-    # TODO XXX: add dropout!
+    y_diff_ffn = t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd)
+    y = y + t_dropout_fwd(y_diff_ffn, train)
+    
+    jac_dropout = t_dropout_bkwd(y_diff_ffn, train)
     jac_tlayer_ffn_p = t_tlayer_ffn_bkwd_p(layer_params[2:], y_diff, t_gelu_fwd)
     jac_tlayer_ffn_x = t_tlayer_ffn_bkwd_x(layer_params[2:], y_diff, t_gelu_fwd)
+      
+    jac_tlayer_ffn_p = _mult_jacs_in_2d(jac_dropout, jac_tlayer_ffn_p, y_diff_ffn)
+    jac_tlayer_ffn_x = _mult_jacs_in_2d(jac_dropout, [jac_tlayer_ffn_x], y_diff_ffn)[0]
     
     jac_layernorm_p = [torch.einsum("abcdef, defg->abcg", jac_tlayer_ffn_x, j) for j in jac_layernorm_p]
     return tuple(jac_layernorm_p + jac_tlayer_ffn_p)
@@ -411,9 +416,14 @@ def t_gpt2_tlayer_sublock2_bkwd_p(layer_params, y, train=True): # input: seq_len
 def t_gpt2_tlayer_sublock2_bkwd_x(layer_params, y, train=True): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     jac_layernorm_x = t_layernorm_bkwd_x(layer_params[:2], y)
-    y = y + t_dropout_fwd(t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd), train)
-    # TODO XXX: add dropout!
+    y_diff_ffn = t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd)
+    y = y + t_dropout_fwd(y_diff_ffn, train)
+    
+    jac_dropout = t_dropout_bkwd(y_diff_ffn, train)
     jac_tlayer_ffn_x = t_tlayer_ffn_bkwd_x(layer_params[2:], y_diff, t_gelu_fwd)
+    
+    # TODO XXX: Figure out how to reliably test addition of the below line
+    jac_tlayer_ffn_x = _mult_jacs_in_2d(jac_dropout, [jac_tlayer_ffn_x], y_diff_ffn)[0]
     
     jac_y = torch.eye(y.numel(), device=y.device)    
     jac_y_diff = torch.einsum("abcdef, defghi->abcghi", jac_tlayer_ffn_x, jac_layernorm_x)
