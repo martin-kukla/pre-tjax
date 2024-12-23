@@ -135,7 +135,7 @@ def t_softmax_attn_fwd(q, k, mask, train):
     attn = attn / math.sqrt(D)
     attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
     sa = torch.exp(t_log_softmax_fwd(attn))
-    sa = t_dropout(sa, train)
+    sa = t_dropout_fwd(sa, train)
     return sa
 
 def t_softmax_attn_bkwd(q, k, mask, train):
@@ -145,7 +145,7 @@ def t_softmax_attn_bkwd(q, k, mask, train):
     attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
     # TODO XXX: would the below line cause numerical stabliity issues?
     sa = torch.exp(t_log_softmax_fwd(attn)) 
-    sa = t_dropout(sa, train)
+    sa = t_dropout_fwd(sa, train)
     
     # TODO XXX: Clean up below..
     d_dropout_dx = 1 #0.9 # TODO: XXX add proper dropout 
@@ -307,11 +307,16 @@ def t_tlayer_ffn_bkwd_x(layer_params, x, activation_fn):
     jac = torch.einsum('abcd,cdef->abef', dffn2_act_dx, dffn1_dx)
     return jac.reshape(x.shape+x.shape)
 
-def t_dropout(x, train=True):
+def t_dropout_fwd(x, train=True):
     if not train: # As we jit the whole loss/inference, the train param is known at tracing time.
         return x * (1-DROPOUT_RATE)
     
     return x * torch.bernoulli(torch.full_like(x, 1-DROPOUT_RATE))
+
+def t_dropout_bkwd(x, train=True):
+    assert train==False # other not implemented yet
+    
+    return torch.eye(x.numel(), device=x.device).reshape(x.shape + x.shape) * (1-DROPOUT_RATE)
 
 def t_layernorm_fwd(layer_params, x):
     x_mean = torch.mean(x, axis=-1, keepdims=True)
@@ -360,13 +365,13 @@ def t_layernorm_bkwd_x(layer_params, x):
 
 def t_gpt2_tlayer_sublock1_fwd(layer_params, y, mask, train=True):
     y_diff = t_layernorm_fwd(layer_params[:2], y)
-    y = y + t_dropout(t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train), train)
+    y = y + t_dropout_fwd(t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train), train)
     return y
 
 def t_gpt2_tlayer_sublock1_bkwd_p(layer_params, y, mask, train=True): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     jac_layernorm_p = t_layernorm_bkwd_p(layer_params[:2], y)
-    y = y + t_dropout(t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train), train)
+    y = y + t_dropout_fwd(t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train), train)
     # TODO XXX: add dropout!
     jac_tlayer_attn_p = t_tlayer_attn_bkwd_p(layer_params[2:], (y_diff, y_diff, y_diff), mask, train)
     jac_tlayer_attn_x = t_tlayer_attn_bkwd_x(layer_params[2:], (y_diff, y_diff, y_diff), mask, train)
@@ -378,7 +383,7 @@ def t_gpt2_tlayer_sublock1_bkwd_p(layer_params, y, mask, train=True): # input: s
 def t_gpt2_tlayer_sublock1_bkwd_x(layer_params, y, mask, train=True): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     jac_layernorm_x = t_layernorm_bkwd_x(layer_params[:2], y)
-    y = y + t_dropout(t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train), train)
+    y = y + t_dropout_fwd(t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train), train)
     # TODO XXX: add dropout!
     jac_tlayer_attn_x = t_tlayer_attn_bkwd_x(layer_params[2:], (y_diff, y_diff, y_diff), mask, train)
     
@@ -389,13 +394,13 @@ def t_gpt2_tlayer_sublock1_bkwd_x(layer_params, y, mask, train=True): # input: s
     
 def t_gpt2_tlayer_sublock2_fwd(layer_params, y, train=True):
     y_diff = t_layernorm_fwd(layer_params[:-4], y)
-    y = y + t_dropout(t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu_fwd), train)
+    y = y + t_dropout_fwd(t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu_fwd), train)
     return y
 
 def t_gpt2_tlayer_sublock2_bkwd_p(layer_params, y, train=True): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     jac_layernorm_p = t_layernorm_bkwd_p(layer_params[:2], y)
-    y = y + t_dropout(t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd), train)
+    y = y + t_dropout_fwd(t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd), train)
     # TODO XXX: add dropout!
     jac_tlayer_ffn_p = t_tlayer_ffn_bkwd_p(layer_params[2:], y_diff, t_gelu_fwd)
     jac_tlayer_ffn_x = t_tlayer_ffn_bkwd_x(layer_params[2:], y_diff, t_gelu_fwd)
@@ -406,7 +411,7 @@ def t_gpt2_tlayer_sublock2_bkwd_p(layer_params, y, train=True): # input: seq_len
 def t_gpt2_tlayer_sublock2_bkwd_x(layer_params, y, train=True): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     jac_layernorm_x = t_layernorm_bkwd_x(layer_params[:2], y)
-    y = y + t_dropout(t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd), train)
+    y = y + t_dropout_fwd(t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd), train)
     # TODO XXX: add dropout!
     jac_tlayer_ffn_x = t_tlayer_ffn_bkwd_x(layer_params[2:], y_diff, t_gelu_fwd)
     
@@ -437,7 +442,7 @@ def t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train=True): # input: seq_len x 
 
 def t_gpt2_tlayers_fwd(params, y, mask, indices, train=True): # input: seq_len x
     y = t_embed_fwd(params[0], y)
-    y = t_dropout(y + params[1][0], train)
+    y = t_dropout_fwd(y + params[1][0], train)
     
     for layer_params in params[2:-1]:
         y = t_gpt2_tlayer_fwd(layer_params, y, mask, train)
@@ -472,7 +477,7 @@ def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True): # input: seq_le
     jac_pos_enc = t_embed_bkwd(params[1], indices) 
     jac_pos_enc = [jac_pos_enc[0] / params[1][0].shape[1] * 2, ]
     # TODO XXX: add dropout
-    y = t_dropout(y + params[1][0], train)
+    y = t_dropout_fwd(y + params[1][0], train)
     
     layers_jacs_p = []
     layers_jacs_x = []
