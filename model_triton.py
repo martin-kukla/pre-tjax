@@ -152,6 +152,10 @@ def t_softmax_attn_bkwd(q, k, mask, train):
     jac_sa_x = d_dropout_dx * sa[..., None, None, None, None] * t_log_softmax_bkwd(attn)
     jac1 = torch.matmul(jac_sa_x, k/math.sqrt(D))
     jac2 = torch.matmul(q.transpose(-2,-1), jac_sa_x/math.sqrt(D)).transpose(-2,-1)
+    # Account for mask:
+    jac_mask = torch.unsqueeze(mask,dim=1)[..., None, None, None, None]
+    jac1 = torch.where(jac_mask, jac1, 0)
+    jac2 = torch.where(jac_mask, jac2, 0)
     return jac1, jac2
 
 def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
