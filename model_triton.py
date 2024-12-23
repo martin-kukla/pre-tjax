@@ -145,7 +145,10 @@ def t_softmax_attn_bkwd(q, k, mask, train):
     attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
     # TODO XXX: would the below line cause numerical stabliity issues?
     sa = torch.exp(t_log_softmax_fwd(attn)) 
-    sa = t_dropout_fwd(sa, train)
+
+    jac_dropout = t_dropout_bkwd(sa, train)
+    #TODO: Note, we are overloading _mult.., as right is not Jacobian...
+    sa = _mult_jacs_in_2d(jac_dropout, [sa], sa)[0] 
     
     # TODO XXX: Clean up below..
     d_dropout_dx = 1 #0.9 # TODO: XXX add proper dropout 
