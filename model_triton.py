@@ -489,12 +489,16 @@ def t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train=True, p_gen_aux=None): # i
       
     return torch.einsum('abcdef, defghi->abcghi', jac_subblock2_x, jac_subblock1_x)
 
-def t_gpt2_tlayers_fwd(params, y, mask, indices, train=True): # input: seq_len x
-    y = t_embed_fwd(params[0], y)
-    y = t_dropout_fwd(y + params[1][0], train)
+def t_gpt2_tlayers_fwd(params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
+    if not train: # as there are 3 dropouts per tlayer
+        p_gen_aux = [None] + [None] * 3 * (len(params) - 3)
     
-    for layer_params in params[2:-1]:
-        y = t_gpt2_tlayer_fwd(layer_params, y, mask, train)
+    y = t_embed_fwd(params[0], y)
+    y = t_dropout_fwd(y + params[1][0], train, p_gen_aux[0])
+    
+    for i, layer_params in enumerate(params[2:-1]):
+        layer_p_gen_aux = p_gen_aux[1+i*3:1+(i+1)*3]
+        y = t_gpt2_tlayer_fwd(layer_params, y, mask, train, layer_p_gen_aux)
     y = t_layernorm_fwd(params[-1], y)
 
     return y
@@ -514,7 +518,10 @@ def _mult_jacs_in_2d(j_left, j_right_tree, y_in):
     j_left_2d = j_left.reshape((-1, y_in.numel()))
     return [mult_j_in_2d(j_left_2d, j) for j in j_right_tree] 
 
-def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True): # input: seq_len x
+def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
+    if not train: # as there are 3 dropouts per tlayer
+        p_gen_aux = [None] + [None] * 3 * (len(params) - 3)    
+    
     indices = torch.arange(y.shape[1], device=y.device).unsqueeze(0).expand(*y.shape) # we ignore indices arg
     jac_embed = t_embed_bkwd(params[0], y)
     # Due to tying of embedding and final projection layers,
@@ -526,15 +533,16 @@ def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True): # input: seq_le
     jac_pos_enc = t_embed_bkwd(params[1], indices) 
     jac_pos_enc = [jac_pos_enc[0] / params[1][0].shape[1] * 2, ]
     # TODO XXX: add dropout
-    y = t_dropout_fwd(y + params[1][0], train)
+    y = t_dropout_fwd(y + params[1][0], train, p_gen_aux[0])
     
     layers_jacs_p = []
     layers_jacs_x = []
     
-    for layer_params in params[2:-1]:
-        layers_jacs_p.append(t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train))
-        layers_jacs_x.append(t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train))
-        y = t_gpt2_tlayer_fwd(layer_params, y, mask, train)
+    for i, layer_params in enumerate(params[2:-1]):
+        layer_p_gen_aux = p_gen_aux[1+i*3:1+(i+1)*3]
+        layers_jacs_p.append(t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train, layer_p_gen_aux))
+        layers_jacs_x.append(t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train, layer_p_gen_aux))
+        y = t_gpt2_tlayer_fwd(layer_params, y, mask, train, layer_p_gen_aux)
     jac_layernorm_p = t_layernorm_bkwd_p(params[-1], y)
     jac_layernorm_x = t_layernorm_bkwd_x(params[-1], y)    
     y = t_layernorm_fwd(params[-1], y)
@@ -550,15 +558,15 @@ def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True): # input: seq_le
 
     return tuple([jac_embed, jac_pos_enc] + layers_jacs_p + [jac_layernorm_p])
 
-def t_gpt2_forward(params, y, y_mask, y_indices, train): # input: seq_len x
-    y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train=train)
+def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
+    y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
     
     y = t_linear_fwd(params[0], y) 
     return y
 
-def t_gpt2_bkwd_p(params, y, y_mask, y_indices, train): # input: seq_len x
-    jac = t_gpt2_tlayers_bkwd_p(params, y, y_mask, y_indices, train=train)
-    y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train=train)
+def t_gpt2_bkwd_p(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
+    jac = t_gpt2_tlayers_bkwd_p(params, y, y_mask, y_indices, train, p_gen_aux)
+    y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
     
     jac_linear_x = t_linear_bkwd_x(params[0], y) 
     jac_linear_p = t_linear_bkwd_p(params[0], y)    
