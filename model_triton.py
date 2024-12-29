@@ -422,18 +422,18 @@ def t_gpt2_tlayer_sublock1_bkwd_x(layer_params, y, mask, train=True, p_gen_aux=N
     jac_y_diff = torch.einsum("xabcdef, defghi->abcghi", jac_tlayer_attn_x, jac_layernorm_x)
     return jac_y.reshape(jac_y_diff.shape) + jac_y_diff
     
-def t_gpt2_tlayer_sublock2_fwd(layer_params, y, train=True):
+def t_gpt2_tlayer_sublock2_fwd(layer_params, y, train=True, p_gen_aux=None):
     y_diff = t_layernorm_fwd(layer_params[:-4], y)
-    y = y + t_dropout_fwd(t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu_fwd), train)
+    y = y + t_dropout_fwd(t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu_fwd), train, p_gen_aux)
     return y
 
-def t_gpt2_tlayer_sublock2_bkwd_p(layer_params, y, train=True): # input: seq_len x emb_dim
+def t_gpt2_tlayer_sublock2_bkwd_p(layer_params, y, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     jac_layernorm_p = t_layernorm_bkwd_p(layer_params[:2], y)
     y_diff_ffn = t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd)
-    y = y + t_dropout_fwd(y_diff_ffn, train)
+    y = y + t_dropout_fwd(y_diff_ffn, train, p_gen_aux)
     
-    jac_dropout = t_dropout_bkwd(y_diff_ffn, train)
+    jac_dropout = t_dropout_bkwd(y_diff_ffn, train, p_gen_aux)
     jac_tlayer_ffn_p = t_tlayer_ffn_bkwd_p(layer_params[2:], y_diff, t_gelu_fwd)
     jac_tlayer_ffn_x = t_tlayer_ffn_bkwd_x(layer_params[2:], y_diff, t_gelu_fwd)
       
@@ -443,13 +443,13 @@ def t_gpt2_tlayer_sublock2_bkwd_p(layer_params, y, train=True): # input: seq_len
     jac_layernorm_p = [torch.einsum("abcdef, defg->abcg", jac_tlayer_ffn_x, j) for j in jac_layernorm_p]
     return tuple(jac_layernorm_p + jac_tlayer_ffn_p)
 
-def t_gpt2_tlayer_sublock2_bkwd_x(layer_params, y, train=True): # input: seq_len x emb_dim
+def t_gpt2_tlayer_sublock2_bkwd_x(layer_params, y, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     jac_layernorm_x = t_layernorm_bkwd_x(layer_params[:2], y)
     y_diff_ffn = t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd)
-    y = y + t_dropout_fwd(y_diff_ffn, train)
+    y = y + t_dropout_fwd(y_diff_ffn, train, p_gen_aux)
     
-    jac_dropout = t_dropout_bkwd(y_diff_ffn, train)
+    jac_dropout = t_dropout_bkwd(y_diff_ffn, train, p_gen_aux)
     jac_tlayer_ffn_x = t_tlayer_ffn_bkwd_x(layer_params[2:], y_diff, t_gelu_fwd)
     
     # TODO XXX: Figure out how to reliably test addition of the below line
