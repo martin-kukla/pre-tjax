@@ -459,24 +459,33 @@ def t_gpt2_tlayer_sublock2_bkwd_x(layer_params, y, train=True, p_gen_aux=None): 
     jac_y_diff = torch.einsum("abcdef, defghi->abcghi", jac_tlayer_ffn_x, jac_layernorm_x)
     return jac_y.reshape(jac_y_diff.shape) + jac_y_diff
 
-def t_gpt2_tlayer_fwd(layer_params, y, mask, train=True): # input: seq_len x emb_dim
-    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train)
-    y = t_gpt2_tlayer_sublock2_fwd(layer_params[-6:], y, train)
+def t_gpt2_tlayer_fwd(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
+    if not train:
+        p_gen_aux = [None, None, None] 
+
+    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    y = t_gpt2_tlayer_sublock2_fwd(layer_params[-6:], y, train, p_gen_aux[2])
     return y
 
-def t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train=True): # input: seq_len x emb_dim
-    jac_subblock1_p = t_gpt2_tlayer_sublock1_bkwd_p(layer_params[:-6], y, mask, train)
-    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train)
-    jac_subblock2_p = t_gpt2_tlayer_sublock2_bkwd_p(layer_params[-6:], y, train)
-    jac_subblock2_x = t_gpt2_tlayer_sublock2_bkwd_x(layer_params[-6:], y, train)
+def t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
+    if not train:
+        p_gen_aux = [None, None, None] 
+        
+    jac_subblock1_p = t_gpt2_tlayer_sublock1_bkwd_p(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    jac_subblock2_p = t_gpt2_tlayer_sublock2_bkwd_p(layer_params[-6:], y, train, p_gen_aux[2])
+    jac_subblock2_x = t_gpt2_tlayer_sublock2_bkwd_x(layer_params[-6:], y, train, p_gen_aux[2])
     
     jac_subblock1_p = _mult_jacs_in_2d(jac_subblock2_x, jac_subblock1_p, y)
     return tuple(jac_subblock1_p) + jac_subblock2_p
 
-def t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train=True): # input: seq_len x emb_dim
-    jac_subblock1_x = t_gpt2_tlayer_sublock1_bkwd_x(layer_params[:-6], y, mask, train)
-    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train)
-    jac_subblock2_x = t_gpt2_tlayer_sublock2_bkwd_x(layer_params[-6:], y, train)
+def t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
+    if not train:
+        p_gen_aux = [None, None, None]    
+    
+    jac_subblock1_x = t_gpt2_tlayer_sublock1_bkwd_x(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    jac_subblock2_x = t_gpt2_tlayer_sublock2_bkwd_x(layer_params[-6:], y, train, p_gen_aux[2])
       
     return torch.einsum('abcdef, defghi->abcghi', jac_subblock2_x, jac_subblock1_x)
 
