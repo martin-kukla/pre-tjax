@@ -8,13 +8,11 @@ import torch
 from torch.func import grad
 from model_triton import log_softmax, batched_forward_gpt2 # TODO XXX XXX: pass forward fn as parameter to relevant functions instead!
 
-def avg_cross_entropy_loss(y_labels, x_logits): # y_labels: batch_len x seq_len, x_logits: batch_len x seq_len x vocab_size
-    # Note that in jax, un-jitted reshape calls are producing copies of array instead of views.
-    # However, for jitted, this SHOULD be optmized away (I checked this function that indeed it is).
-    y_labels_1d = torch.reshape(y_labels, (-1,)) # there is probably a way of doing it while staying in 2d..
-    x_logits_2d = torch.reshape(x_logits, (y_labels.numel(), -1))
-    elements_loss = log_softmax(x_logits_2d)[(torch.arange(y_labels.numel()), y_labels_1d)] # TODO XXX: check these numels introduced for size!
-    elements_loss = torch.where(y_labels_1d != 0, elements_loss, float('nan')) # account for padding tokens
+def avg_cross_entropy_loss(y_labels, x_logits): # y_labels: BS x N, x_logits: BS x S x vocab_size
+    y_labels_1d = y_labels.reshape((-1,)) 
+    x_logits_2d = x_logits.reshape((y_labels.numel(), -1))
+    elements_loss = log_softmax(x_logits_2d)[(torch.arange(y_labels.numel()), y_labels_1d)]
+    elements_loss = torch.where(y_labels_1d != 0, elements_loss, float('nan'))
     result = -torch.nanmean(elements_loss) 
     return result, torch.count_nonzero(y_labels)
 
