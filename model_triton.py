@@ -310,16 +310,25 @@ def t_tlayer_ffn_bkwd_x(layer_params, x, activation_fn):
     jac = torch.einsum('abcd,cdef->abef', dffn2_act_dx, dffn1_dx)
     return jac.reshape(x.shape+x.shape)
 
-def t_dropout_fwd(x, train=True):
+def t_dropout_fwd(x, train=True, p_gen_aux=None):
     if not train: # As we jit the whole loss/inference, the train param is known at tracing time.
         return x * (1-DROPOUT_RATE)
     
-    return x * torch.bernoulli(torch.full_like(x, 1-DROPOUT_RATE))
-
-def t_dropout_bkwd(x, train=True):
-    assert train==False # other not implemented yet
+    assert p_gen_aux is not None
+    generator = torch.Generator(device=x.device).manual_seed(p_gen_aux)
+    mask = torch.bernoulli(torch.full_like(x, 1-DROPOUT_RATE), generator=generator)
     
-    return torch.eye(x.numel(), device=x.device).reshape(x.shape + x.shape) * (1-DROPOUT_RATE)
+    return x * mask
+
+def t_dropout_bkwd(x, train=True, p_gen_aux=None):
+    eyed_jac = torch.eye(x.numel(), device=x.device).reshape(x.shape + x.shape)
+    if not train: # we will never use this jacobian..
+        return eyed_jac * (1-DROPOUT_RATE)
+
+    assert p_gen_aux is not None
+    generator = torch.Generator(device=x.device).manual_seed(p_gen_aux)
+    mask = torch.bernoulli(torch.full_like(x, 1-DROPOUT_RATE), generator=generator) 
+    return eyed_jac * mask
 
 def t_layernorm_fwd(layer_params, x):
     x_mean = torch.mean(x, axis=-1, keepdims=True)
