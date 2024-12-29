@@ -215,44 +215,44 @@ def old_t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True): # inputs: batch_size
     
     return jac_q, jac_k, jac_v
 
-def t_tlayer_attn_heads_fwd(layer_params, qkv, mask, train): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
+def t_tlayer_attn_heads_fwd(layer_params, qkv, mask, train, p_gen_aux=None): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
     qkv = torch.stack(qkv,dim=-3) # batch_size x 3 x seq_len x emb_dim
     
     proj_qkv = t_proj_fwd(layer_params, torch.unsqueeze(qkv, 1)) # batch_size x heads x 3 x seq_len x emb_dim
-    return t_scaled_dot_prod_attn_fwd(proj_qkv, mask, train)
+    return t_scaled_dot_prod_attn_fwd(proj_qkv, mask, train, p_gen_aux)
 
-def t_tlayer_attn_heads_bkwd_p(layer_params, qkv, mask, train): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
+def t_tlayer_attn_heads_bkwd_p(layer_params, qkv, mask, train, p_gen_aux=None): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
     qkv = torch.stack(qkv,dim=-3).unsqueeze(1)
     
     proj_qkv = t_proj_fwd(layer_params, qkv)
     jac_proj_p = t_proj_bkwd_p(layer_params, qkv)
      
-    jac_sdpa_x = t_scaled_dot_prod_attn_bkwd(proj_qkv, mask, train)
+    jac_sdpa_x = t_scaled_dot_prod_attn_bkwd(proj_qkv, mask, train, p_gen_aux)
     jac_sdpa_x = torch.stack(jac_sdpa_x, dim=-3)
     jac_p = _mult_jacs_in_2d(jac_sdpa_x, [jac_proj_p], qkv)[0]
     return jac_p
 
-def t_tlayer_attn_heads_bkwd_x(layer_params, qkv, mask, train): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
+def t_tlayer_attn_heads_bkwd_x(layer_params, qkv, mask, train, p_gen_aux=None): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
     qkv = torch.stack(qkv,dim=-3).unsqueeze(1)
     
     proj_qkv = t_proj_fwd(layer_params, qkv)
     jac_proj_x = t_proj_bkwd_x(layer_params, qkv)
      
-    jac_sdpa_x = t_scaled_dot_prod_attn_bkwd(proj_qkv, mask, train)
+    jac_sdpa_x = t_scaled_dot_prod_attn_bkwd(proj_qkv, mask, train, p_gen_aux)
     jac_sdpa_x = torch.stack(jac_sdpa_x, dim=-3)
     jac_x = _mult_jacs_in_2d(jac_sdpa_x, [jac_proj_x], qkv)[0]
     
     return jac_x.squeeze(-4).unbind(-3)
 
-def t_tlayer_attn_fwd(layer_params, qkv, mask, train): # input: batch_size x seq_len x emb_dim
-    heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train)
+def t_tlayer_attn_fwd(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
+    heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train, p_gen_aux)
     BS, H, N, D = heads_attns.shape
     attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
     return t_proj_fwd(layer_params[-1], attn)
 
-def t_tlayer_attn_bkwd_p(layer_params, qkv, mask, train): # input: batch_size x seq_len x emb_dim
-    jac_heads_attns_p = t_tlayer_attn_heads_bkwd_p(layer_params[0], qkv, mask, train)
-    heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train)
+def t_tlayer_attn_bkwd_p(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
+    jac_heads_attns_p = t_tlayer_attn_heads_bkwd_p(layer_params[0], qkv, mask, train, p_gen_aux)
+    heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train, p_gen_aux)
     BS, H, N, D = heads_attns.shape  
     attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
     jac_heads_attns_p = jac_heads_attns_p.transpose(1, 2).reshape((BS, N, -1) + layer_params[0].shape)  
@@ -263,9 +263,9 @@ def t_tlayer_attn_bkwd_p(layer_params, qkv, mask, train): # input: batch_size x 
     res = _mult_jacs_in_2d(jac_proj_x, [jac_heads_attns_p], qkv[0])[0]
     return res, jac_proj_p
 
-def t_tlayer_attn_bkwd_x(layer_params, qkv, mask, train): # input: batch_size x seq_len x emb_dim
-    jac_heads_attns_x = t_tlayer_attn_heads_bkwd_x(layer_params[0], qkv, mask, train)
-    heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train)
+def t_tlayer_attn_bkwd_x(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
+    jac_heads_attns_x = t_tlayer_attn_heads_bkwd_x(layer_params[0], qkv, mask, train, p_gen_aux)
+    heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train, p_gen_aux)
     BS, H, N, D = heads_attns.shape
     attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
     jac_heads_attns_x = [j.transpose(1, 2).reshape((BS, N, -1) + qkv[0].shape) for j in jac_heads_attns_x]
