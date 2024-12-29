@@ -374,21 +374,27 @@ def t_layernorm_bkwd_x(layer_params, x):
     x_2d = x.reshape((-1, x.shape[-1]))
     jac_x_2d = (layer_params[0] * normalized_x_bkwd(x_2d)).transpose(-3,-1)
     return jac_x_2d.reshape(x.shape + x.shape)
-
-def t_gpt2_tlayer_sublock1_fwd(layer_params, y, mask, train=True):
+    
+def t_gpt2_tlayer_sublock1_fwd(layer_params, y, mask, train=True, p_gen_aux=None):
+    if not train:
+        p_gen_aux = [None, None]
+        
     y_diff = t_layernorm_fwd(layer_params[:2], y)
-    y = y + t_dropout_fwd(t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train), train)
+    y = y + t_dropout_fwd(t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0]), train, p_gen_aux[1])
     return y
 
-def t_gpt2_tlayer_sublock1_bkwd_p(layer_params, y, mask, train=True): # input: seq_len x emb_dim
+def t_gpt2_tlayer_sublock1_bkwd_p(layer_params, y, mask, train=True, p_gen_aux=None): # input: seq_len x emb_dim
+    if not train:
+        p_gen_aux = [None, None]
+        
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     jac_layernorm_p = t_layernorm_bkwd_p(layer_params[:2], y)
-    y_diff_attn = t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train)
-    y = y + t_dropout_fwd(y_diff_attn, train)
+    y_diff_attn = t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    y = y + t_dropout_fwd(y_diff_attn, train, p_gen_aux[1])
 
-    jac_dropout = t_dropout_bkwd(y_diff_attn, train)
-    jac_tlayer_attn_p = t_tlayer_attn_bkwd_p(layer_params[2:], (y_diff, y_diff, y_diff), mask, train)
-    jac_tlayer_attn_x = t_tlayer_attn_bkwd_x(layer_params[2:], (y_diff, y_diff, y_diff), mask, train)
+    jac_dropout = t_dropout_bkwd(y_diff_attn, train, p_gen_aux[1])
+    jac_tlayer_attn_p = t_tlayer_attn_bkwd_p(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    jac_tlayer_attn_x = t_tlayer_attn_bkwd_x(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
     
     jac_tlayer_attn_p = _mult_jacs_in_2d(jac_dropout, jac_tlayer_attn_p, y_diff_attn)
     jac_tlayer_attn_x = _mult_jacs_in_2d(jac_dropout, jac_tlayer_attn_x, y_diff_attn)
@@ -397,14 +403,17 @@ def t_gpt2_tlayer_sublock1_bkwd_p(layer_params, y, mask, train=True): # input: s
     jac_layernorm_p = [torch.einsum("xabcdef, defg->abcg", jac_tlayer_attn_x, j) for j in jac_layernorm_p]
     return tuple(jac_layernorm_p + jac_tlayer_attn_p)
 
-def t_gpt2_tlayer_sublock1_bkwd_x(layer_params, y, mask, train=True): # input: seq_len x emb_dim
+def t_gpt2_tlayer_sublock1_bkwd_x(layer_params, y, mask, train=True, p_gen_aux=None): # input: seq_len x emb_dim
+    if not train:
+        p_gen_aux = [None, None]
+    
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     jac_layernorm_x = t_layernorm_bkwd_x(layer_params[:2], y)
-    y_diff_attn = t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train)
-    y = y + t_dropout_fwd(y_diff_attn, train)
+    y_diff_attn = t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    y = y + t_dropout_fwd(y_diff_attn, train, p_gen_aux[1])
 
-    jac_dropout = t_dropout_bkwd(y_diff_attn, train)
-    jac_tlayer_attn_x = t_tlayer_attn_bkwd_x(layer_params[2:], (y_diff, y_diff, y_diff), mask, train)
+    jac_dropout = t_dropout_bkwd(y_diff_attn, train, p_gen_aux[1])
+    jac_tlayer_attn_x = t_tlayer_attn_bkwd_x(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
     
     jac_tlayer_attn_x = _mult_jacs_in_2d(jac_dropout, jac_tlayer_attn_x, y_diff_attn)
     
