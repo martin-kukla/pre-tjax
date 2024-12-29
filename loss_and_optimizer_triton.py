@@ -16,6 +16,20 @@ def avg_cross_entropy_loss(y_labels, x_logits): # y_labels: BS x N, x_logits: BS
     result = -torch.nanmean(elements_loss) 
     return result, torch.count_nonzero(y_labels)
 
+# TODO XXX: Clean up + split loss_and_optimzer for torch.func and triton
+def avg_cross_entropy_loss_bkwd(y_labels, x_logits):
+    y_labels_1d = y_labels.reshape((-1,))
+    x_logits_2d = x_logits.reshape((y_labels.numel(), -1))
+    elements_loss = t_log_softmax_fwd(x_logits_2d)[(torch.arange(y_labels.numel()), y_labels_1d)]
+    elements_loss = torch.where(y_labels_1d != 0, elements_loss, float('nan'))
+    
+    jac_softmax = t_log_softmax_bkwd(x_logits_2d)[(torch.arange(y_labels.numel()), y_labels_1d)]
+    # TODO XXX: code up derivative for torch.nanmean
+    jac_nanmean = -torch.func.jacrev(torch.nanmean)(elements_loss) 
+    jac_x_logits = torch.einsum("a, abc -> bc", jac_nanmean, jac_softmax)
+    
+    return jac_x_logits.reshape(x_logits.shape)
+
 def accuracy(y_labels, x_logits):
     return torch.nanmean(torch.where(y_labels!=0, y_labels == torch.argmax(x_logits, axis=-1), float('nan')))
 
