@@ -129,16 +129,16 @@ def my_t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
     outdims = indims[:-1] + (outdim, )
     return (jac*aux).reshape(outdims + indims)
 
-def t_softmax_attn_fwd(q, k, mask, train):
+def t_softmax_attn_fwd(q, k, mask, train, p_gen_aux=None):
     D = q.shape[-1]
     attn = torch.matmul(q, torch.transpose(k, -2, -1))
     attn = attn / math.sqrt(D)
     attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
     sa = torch.exp(t_log_softmax_fwd(attn))
-    sa = t_dropout_fwd(sa, train)
+    sa = t_dropout_fwd(sa, train, p_gen_aux)
     return sa
 
-def t_softmax_attn_bkwd(q, k, mask, train):
+def t_softmax_attn_bkwd(q, k, mask, train, p_gen_aux=None):
     D = q.shape[-1]
     attn = torch.matmul(q, torch.transpose(k, -2, -1))
     attn = attn / math.sqrt(D)
@@ -146,7 +146,7 @@ def t_softmax_attn_bkwd(q, k, mask, train):
     # TODO XXX: would the below line cause numerical stabliity issues?
     sa = torch.exp(t_log_softmax_fwd(attn)) 
 
-    jac_dropout = t_dropout_bkwd(sa, train)
+    jac_dropout = t_dropout_bkwd(sa, train, p_gen_aux)
     #TODO: Note, we are overloading _mult.., as right is not Jacobian...
     sa = _mult_jacs_in_2d(jac_dropout, [sa], sa)[0] 
     
@@ -161,17 +161,17 @@ def t_softmax_attn_bkwd(q, k, mask, train):
     jac2 = torch.where(jac_mask, jac2, 0)
     return jac1, jac2
 
-def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
-    q, k, v = torch.unbind(qkv, dim=2)# batch_size x heads x seq_len x emb_dim
-    softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train)
-    return torch.matmul(softmaxed_attn, v) # output: seq_len x emb_dim
+def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
+    q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
+    softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train, p_gen_aux)
+    return torch.matmul(softmaxed_attn, v) # output: BS x N x D
 
-def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True): # inputs: batch_size x heads x 3 x seq_len x emb_dim, mask: batch_size x seq_len(q) x seq_len(k)
+def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     BS, H, _, N, D = qkv.shape
     q, k, v = torch.unbind(qkv, dim=2)
     
-    sa = t_softmax_attn_fwd(q, k, mask, train)
-    jac_sa_q, jac_sa_k = t_softmax_attn_bkwd(q, k, mask, train)     
+    sa = t_softmax_attn_fwd(q, k, mask, train, p_gen_aux)
+    jac_sa_q, jac_sa_k = t_softmax_attn_bkwd(q, k, mask, train, p_gen_aux)     
     
     # TODO XXX: code up jacobian for bmm
     from torch.func import jacrev
