@@ -64,6 +64,25 @@ loss_eval = torch.compile(partial(loss, train=False))
 
 grad_loss = torch.compile(grad(loss_train, has_aux=True))
 
+# TODO: move it to separate file
+from model_triton import t_gpt2_forward, t_gpt2_bkwd_p, _mult_jacs_in_2d
+def loss_bkwd(params, y, y_mask, y_indices, train):  # inputs: batch_size x seq_len
+    y_in = y[:, :-1]
+    y_out = y[:, 1:]
+    
+    # TODO: write it without copying memory? is it possible? 
+    jac_gpt2 = t_gpt2_bkwd_p(params, y_in, y_mask, y_indices, train)
+    logits = t_gpt2_forward(params, y_in, y_mask, y_indices, train) 
+    
+    jac_celoss = avg_cross_entropy_loss_bkwd(y_out, logits)
+    loss_val, tokens_count = avg_cross_entropy_loss(y_out, logits)
+    acc = accuracy(y_out, logits) # TODO: Do I need to stop_gradient on this? I think not, but double-check
+    
+    dloss_dp = list(jac_gpt2)
+    for i in range(len(dloss_dp)):
+        dloss_dp[i] = _mult_jacs_in_2d(jac_celoss, dloss_dp[i], logits)
+    return dloss_dp, (loss_val, acc, tokens_count/y_out.numel()) # TODO: this is wrapping, but we could make use of jax.value_and_grad instead
+
 # print(f'iter #{i} loss {loss_train(params, jnp.array(x[:1]), jnp.array(y[:1]), random.PRNGKey(0))[0] }')
 
 # with jax.disable_jit():
