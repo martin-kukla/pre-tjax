@@ -49,12 +49,33 @@ def accuracy(y_labels, x_logits):
 #     y_sample = y_sample[:, 1:]
 #     return jnp.where(y_sample!=start_tok, y_sample, 0) # It should not be happening, but for random model it might.2
 
-def loss(params, y, y_mask, y_indices, train):  # inputs: batch_size x seq_len
+BIG_NR=1_000_000
+def sample_p_gen_aux(nlayers, device):
+    n = 1 + 3 * nlayers
+    p_gen_aux = torch.randint(0, BIG_NR, (n,), device=device)
+    return [it.item() for it in p_gen_aux]
+    
+
+# Providing backward compatibilty: loss function should support 
+# training with and without passed p_gen_aux param
+# TODO XXX: seperate loss fn for torch.func's and triton's implementations
+def _handle_loss_p_gen_aux(params, train, p_gen_aux):
+    nlayers = len(params) - 3
+    if p_gen_aux is None:
+        if train: # backward compatibilty
+            p_gen_aux = sample_p_gen_aux(nlayers, params[0][0].device)
+        else: # 3 dropout per layer
+            p_gen_aux = [None] + [None] * 3 * nlayers
+    return p_gen_aux
+
+def loss(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
+    p_gen_aux = _handle_loss_p_gen_aux(params, train, p_gen_aux)
+
     y_in = y[:, :-1]
     y_out = y[:, 1:]
     
     # TODO: write it without copying memory? is it possible? 
-    logits = batched_forward_gpt2(params, y_in, y_mask, y_indices, train) 
+    logits = batched_forward_gpt2(params, y_in, y_mask, y_indices, train, p_gen_aux) 
     loss_val, tokens_count = avg_cross_entropy_loss(y_out, logits)
     acc = accuracy(y_out, logits) # TODO: Do I need to stop_gradient on this? I think not, but double-check
     return loss_val, (loss_val, acc, tokens_count/y_out.numel()) # TODO: this is wrapping, but we could make use of jax.value_and_grad instead
@@ -66,22 +87,24 @@ grad_loss = torch.compile(grad(loss_train, has_aux=True))
 
 # TODO: move it to separate file
 from model_triton import t_gpt2_forward, t_gpt2_bkwd_p, _mult_jacs_in_2d
-def loss_bkwd(params, y, y_mask, y_indices, train):  # inputs: batch_size x seq_len
+def t_loss_bkwd(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
+    if not train and p_gen_aux is None:
+        p_gen_aux = [None] + [None] * 3 * (len(params) - 3)
+    
     y_in = y[:, :-1]
     y_out = y[:, 1:]
-    
-    # TODO: write it without copying memory? is it possible? 
-    jac_gpt2 = t_gpt2_bkwd_p(params, y_in, y_mask, y_indices, train)
-    logits = t_gpt2_forward(params, y_in, y_mask, y_indices, train) 
+     
+    jac_gpt2 = t_gpt2_bkwd_p(params, y_in, y_mask, y_indices, train, p_gen_aux)
+    logits = t_gpt2_forward(params, y_in, y_mask, y_indices, train, p_gen_aux) 
     
     jac_celoss = avg_cross_entropy_loss_bkwd(y_out, logits)
     loss_val, tokens_count = avg_cross_entropy_loss(y_out, logits)
-    acc = accuracy(y_out, logits) # TODO: Do I need to stop_gradient on this? I think not, but double-check
+    acc = accuracy(y_out, logits)
     
     dloss_dp = list(jac_gpt2)
     for i in range(len(dloss_dp)):
         dloss_dp[i] = _mult_jacs_in_2d(jac_celoss, dloss_dp[i], logits)
-    return dloss_dp, (loss_val, acc, tokens_count/y_out.numel()) # TODO: this is wrapping, but we could make use of jax.value_and_grad instead
+    return dloss_dp, (loss_val, acc, tokens_count/y_out.numel())
 
 # print(f'iter #{i} loss {loss_train(params, jnp.array(x[:1]), jnp.array(y[:1]), random.PRNGKey(0))[0] }')
 
