@@ -50,9 +50,12 @@ def accuracy(y_labels, x_logits):
 #     return jnp.where(y_sample!=start_tok, y_sample, 0) # It should not be happening, but for random model it might.2
 
 BIG_NR=1_000_000
-def sample_p_gen_aux(nlayers, device):
+def sample_p_gen_aux(params):
+    nlayers = len(params) - 3
+    device = params[0][0].device
+    
     n = 1 + 3 * nlayers
-    p_gen_aux = torch.randint(0, BIG_NR, (n,), device=device)
+    p_gen_aux = torch.randint(0, BIG_NR, (n,), device=device) # TODO XXX: replace with random.random?
     return [it.item() for it in p_gen_aux]
     
 
@@ -63,7 +66,7 @@ def _handle_loss_p_gen_aux(params, train, p_gen_aux):
     nlayers = len(params) - 3
     if p_gen_aux is None:
         if train: # backward compatibilty
-            p_gen_aux = sample_p_gen_aux(nlayers, params[0][0].device)
+            p_gen_aux = sample_p_gen_aux(params)
         else: # 3 dropout per layer
             p_gen_aux = [None] + [None] * 3 * nlayers
     return p_gen_aux
@@ -135,7 +138,16 @@ def t_loss_bkwd(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs:
 # @partial(jax.jit, donate_argnames=("acc_grads")) # TODO XXX: use torch.compile here. TODO XXX: What about in_place operations??
 #@torch.compile
 def acc_grad_loss(acc_grads, params, y, y_mask, y_indices):
-    i_step_grads, grad_loss_rest = grad_loss(params, y, y_mask, y_indices)
+    return _acc_grad_loss(grad_loss, acc_grads, params, y, y_mask, y_indices)
+
+def t_acc_grad_loss(acc_grads, params, y, y_mask, y_indices):
+    p_gen_aux = sample_p_gen_aux(params)
+    grad_loss_fn = partial(t_loss_bkwd, train=True, p_gen_aux=p_gen_aux)
+    return _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices)
+
+
+def _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices):
+    i_step_grads, grad_loss_rest = grad_loss_fn(params, y, y_mask, y_indices)
     
     for grp_i in range(len(acc_grads)):
         for p_i in range(len(acc_grads[grp_i])):
