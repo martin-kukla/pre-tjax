@@ -61,28 +61,6 @@ def accuracy(y_labels, x_logits):
 #     y_sample = y_sample[:, 1:]
 #     return jnp.where(y_sample!=start_tok, y_sample, 0) # It should not be happening, but for random model it might.2
 
-BIG_NR=1_000_000
-def sample_p_gen_aux(params):
-    nlayers = len(params) - 3
-    device = params[0][0].device
-    
-    n = 1 + 3 * nlayers
-    p_gen_aux = torch.randint(0, BIG_NR, (n,), device=device) # TODO XXX: replace with random.random?
-    return [it.item() for it in p_gen_aux]
-    
-
-# Providing backward compatibilty: loss function should support 
-# training with and without passed p_gen_aux param
-# TODO XXX: seperate loss fn for torch.func's and triton's implementations
-def _handle_loss_p_gen_aux(params, train, p_gen_aux):
-    nlayers = len(params) - 3
-    if p_gen_aux is None:
-        if train: # backward compatibilty
-            p_gen_aux = sample_p_gen_aux(params)
-        else: # 3 dropout per layer
-            p_gen_aux = [None] + [None] * 3 * nlayers
-    return p_gen_aux
-
 def loss(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
     return _loss(batched_forward_gpt2, avg_cross_entropy_loss, params, y, y_mask, y_indices, train, p_gen_aux)
 
@@ -90,9 +68,6 @@ def t_loss(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x
     return _loss(t_batched_forward_gpt2, t_avg_cross_entropy_loss, params, y, y_mask, y_indices, train, p_gen_aux)
     
 def _loss(fwd_fn, celoss_fn, params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
-    # TODO XXX: we don't need this for t_loss nor loss. Remove!
-    p_gen_aux = _handle_loss_p_gen_aux(params, train, p_gen_aux) 
-
     y_in = y[:, :-1]
     y_out = y[:, 1:]
     
@@ -107,10 +82,7 @@ loss_eval = torch.compile(partial(loss, train=False))
 
 grad_loss = torch.compile(grad(loss_train, has_aux=True))
 
-def t_loss_bkwd(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
-    if not train and p_gen_aux is None:
-        p_gen_aux = [None] + [None] * 3 * (len(params) - 3)
-    
+def t_loss_bkwd(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N    
     y_in = y[:, :-1]
     y_out = y[:, 1:]
      
@@ -156,6 +128,15 @@ def t_loss_bkwd(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs:
 #@torch.compile
 def acc_grad_loss(acc_grads, params, y, y_mask, y_indices):
     return _acc_grad_loss(grad_loss, acc_grads, params, y, y_mask, y_indices)
+
+BIG_NR=1_000_000
+def sample_p_gen_aux(params):
+    nlayers = len(params) - 3
+    device = params[0][0].device
+    
+    n = 1 + 3 * nlayers
+    p_gen_aux = torch.randint(0, BIG_NR, (n,), device=device) # TODO XXX: replace with random.random?
+    return [it.item() for it in p_gen_aux]
 
 def t_acc_grad_loss(acc_grads, params, y, y_mask, y_indices):
     p_gen_aux = sample_p_gen_aux(params)
