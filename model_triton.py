@@ -74,12 +74,11 @@ def t_gelu_bkwd(x): # TODO XXX XXX: I think maths can be simplified here?
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
 
-def t_linear_bkwd_p(layer_params, x): # input: seq_len x emb_dim
-    x_indim = x.shape[0] # TODO: support x > 2D
+def t_linear_bkwd_p(layer_params, x): # input: N x D
     outdim = layer_params[1].shape[0]
 
     jac1 = t_proj_bkwd_p(layer_params[0], x)
-    jac2 = torch.eye(outdim, device=x.device).expand((x_indim, outdim, outdim))
+    jac2 = torch.eye(outdim, device=x.device).expand(x.shape[:-1] + (outdim, outdim))
     return jac1, jac2
 
 def t_linear_bkwd_x(layer_params, x): # input: seq_len x emb_dim
@@ -557,6 +556,7 @@ def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True, p_gen_aux=None):
     jac_dropout = torch.einsum('abcdef, defghi -> abcghi', layers_jacs_x[0], jac_dropout)
     jac_pos_enc[0] =torch.einsum('abcdef, defgh -> abcgh', jac_dropout, jac_pos_enc[0])
     jac_embed[0] = torch.einsum('abcdef, defgh -> abcgh', jac_dropout, jac_embed[0])
+    # Note, no need to propagate for jac_embed[1], since it's zeroeed 
 
     return tuple([jac_embed, jac_pos_enc] + layers_jacs_p + [jac_layernorm_p])
 
@@ -577,8 +577,8 @@ def t_gpt2_bkwd_p(params, y, y_mask, y_indices, train, p_gen_aux=None): # input:
     for i in range(len(jac)):
         jac[i] = _mult_jacs_in_2d(jac_linear_x, jac[i], y)
     
-    # As we tie embedding and last projection weights
-    jac[0] = (jac[0][0] + jac_linear_p[0], jac[0][1] + jac_linear_p[1])
+    # As we tie embedding and last projection weights (no need to add jac[0][1] as it's zeroed)
+    jac[0] = (jac[0][0] + jac_linear_p[0], jac_linear_p[1])
     return tuple(jac)
 
 
