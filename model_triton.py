@@ -530,9 +530,9 @@ def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True, p_gen_aux=None):
     y = t_embed_fwd(params[0], y)
     # Reuse t_embed_bkwd to compute jacobian of pos_encoding
     # Need to account for lack of  1/ sqrt(emb_dim)
-    jac_pos_enc = t_embed_bkwd(params[1], indices) 
-    jac_pos_enc = [jac_pos_enc[0] / params[1][0].shape[1] * 2, ]
-    # TODO XXX: add dropout
+    jac_pos_enc = list(t_embed_bkwd(params[1], indices))
+    jac_pos_enc[0][jac_pos_enc[0]!=0] = 1
+    jac_dropout = t_dropout_bkwd(y + params[1][0], train, p_gen_aux[0])
     y = t_dropout_fwd(y + params[1][0], train, p_gen_aux[0])
     
     layers_jacs_p = []
@@ -553,8 +553,10 @@ def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True, p_gen_aux=None):
     for i in reversed(range(1, len(layers_jacs_p))):
         layers_jacs_x[i-1]=torch.einsum('abcdef, defghi -> abcghi',layers_jacs_x[i], layers_jacs_x[i-1])
         layers_jacs_p[i-1] = _mult_jacs_in_2d(layers_jacs_x[i], layers_jacs_p[i-1], y)
-    jac_pos_enc[0] =torch.einsum('abcdef, defgh -> abcgh', layers_jacs_x[0], jac_pos_enc[0])
-    jac_embed[0] = torch.einsum('abcdef, defgh -> abcgh', layers_jacs_x[0], jac_embed[0])
+    print(f'layers_jacs_x[0].shape', layers_jacs_x[0].shape, 'jac_dropout.shape', jac_dropout.shape)
+    jac_dropout = torch.einsum('abcdef, defghi -> abcghi', layers_jacs_x[0], jac_dropout)
+    jac_pos_enc[0] =torch.einsum('abcdef, defgh -> abcgh', jac_dropout, jac_pos_enc[0])
+    jac_embed[0] = torch.einsum('abcdef, defgh -> abcgh', jac_dropout, jac_embed[0])
 
     return tuple([jac_embed, jac_pos_enc] + layers_jacs_p + [jac_layernorm_p])
 
