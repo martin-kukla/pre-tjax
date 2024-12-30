@@ -1,3 +1,9 @@
+# This currently contains Loss+Optimizer logic for both
+# frameworks: Torch.Func and Triton.
+# The function for the latter are prefixed with t_
+# Some of the functions are shared between two.
+# TODO: We should probably separate the logic into two separate files.
+
 # ##
 # Loss + grads
 # ##
@@ -6,18 +12,24 @@ from functools import partial
 import math
 import torch
 from torch.func import grad
-from model_triton import log_softmax, batched_forward_gpt2 # TODO XXX XXX: pass forward fn as parameter to relevant functions instead!
+from model_torch_func import log_softmax, batched_forward_gpt2
+from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_batched_forward_gpt2, t_gpt2_forward, t_gpt2_bkwd_p, _mult_jacs_in_2d
 
-def avg_cross_entropy_loss(y_labels, x_logits): # y_labels: BS x N, x_logits: BS x S x vocab_size
+def avg_cross_entropy_loss(y_labels, x_logits):
+    return _avg_cross_entropy_loss(log_softmax, y_labels, x_logits)
+
+def t_avg_cross_entropy_loss(y_labels, x_logits):
+    return _avg_cross_entropy_loss(t_log_softmax_fwd, y_labels, x_logits)
+
+def _avg_cross_entropy_loss(log_softmax_fn, y_labels, x_logits): # y_labels: BS x N, x_logits: BS x S x vocab_size
     y_labels_1d = y_labels.reshape((-1,)) 
     x_logits_2d = x_logits.reshape((y_labels.numel(), -1))
-    elements_loss = log_softmax(x_logits_2d)[(torch.arange(y_labels.numel()), y_labels_1d)]
+    elements_loss = log_softmax_fn(x_logits_2d)[(torch.arange(y_labels.numel()), y_labels_1d)]
     elements_loss = torch.where(y_labels_1d != 0, elements_loss, float('nan'))
     result = -torch.nanmean(elements_loss) 
     return result, torch.count_nonzero(y_labels)
 
-# TODO XXX: Clean up + split loss_and_optimzer for torch.func and triton
-def avg_cross_entropy_loss_bkwd(y_labels, x_logits):
+def t_avg_cross_entropy_loss_bkwd(y_labels, x_logits):
     y_labels_1d = y_labels.reshape((-1,))
     x_logits_2d = x_logits.reshape((y_labels.numel(), -1))
     elements_loss = t_log_softmax_fwd(x_logits_2d)[(torch.arange(y_labels.numel()), y_labels_1d)]
@@ -72,14 +84,21 @@ def _handle_loss_p_gen_aux(params, train, p_gen_aux):
     return p_gen_aux
 
 def loss(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
-    p_gen_aux = _handle_loss_p_gen_aux(params, train, p_gen_aux)
+    return _loss(batched_forward_gpt2, avg_cross_entropy_loss, params, y, y_mask, y_indices, train, p_gen_aux)
+
+def t_loss(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
+    return _loss(t_batched_forward_gpt2, t_avg_cross_entropy_loss, params, y, y_mask, y_indices, train, p_gen_aux)
+    
+def _loss(fwd_fn, celoss_fn, params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
+    # TODO XXX: we don't need this for t_loss nor loss. Remove!
+    p_gen_aux = _handle_loss_p_gen_aux(params, train, p_gen_aux) 
 
     y_in = y[:, :-1]
     y_out = y[:, 1:]
     
     # TODO: write it without copying memory? is it possible? 
-    logits = batched_forward_gpt2(params, y_in, y_mask, y_indices, train, p_gen_aux) 
-    loss_val, tokens_count = avg_cross_entropy_loss(y_out, logits)
+    logits = fwd_fn(params, y_in, y_mask, y_indices, train, p_gen_aux) 
+    loss_val, tokens_count = celoss_fn(y_out, logits)
     acc = accuracy(y_out, logits) # TODO: Do I need to stop_gradient on this? I think not, but double-check
     return loss_val, (loss_val, acc, tokens_count/y_out.numel()) # TODO: this is wrapping, but we could make use of jax.value_and_grad instead
 
@@ -88,8 +107,6 @@ loss_eval = torch.compile(partial(loss, train=False))
 
 grad_loss = torch.compile(grad(loss_train, has_aux=True))
 
-# TODO: move it to separate file
-from model_triton import t_gpt2_forward, t_gpt2_bkwd_p, _mult_jacs_in_2d
 def t_loss_bkwd(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
     if not train and p_gen_aux is None:
         p_gen_aux = [None] + [None] * 3 * (len(params) - 3)
@@ -100,8 +117,8 @@ def t_loss_bkwd(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs:
     jac_gpt2 = t_gpt2_bkwd_p(params, y_in, y_mask, y_indices, train, p_gen_aux)
     logits = t_gpt2_forward(params, y_in, y_mask, y_indices, train, p_gen_aux) 
     
-    jac_celoss = avg_cross_entropy_loss_bkwd(y_out, logits)
-    loss_val, tokens_count = avg_cross_entropy_loss(y_out, logits)
+    jac_celoss = t_avg_cross_entropy_loss_bkwd(y_out, logits)
+    loss_val, tokens_count = t_avg_cross_entropy_loss(y_out, logits)
     acc = accuracy(y_out, logits)
     
     dloss_dp = list(jac_gpt2)
