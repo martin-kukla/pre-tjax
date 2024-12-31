@@ -62,17 +62,18 @@ def accuracy(y_labels, x_logits):
 #     return jnp.where(y_sample!=start_tok, y_sample, 0) # It should not be happening, but for random model it might.2
 
 def loss(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
-    return _loss(batched_forward_gpt2, avg_cross_entropy_loss, params, y, y_mask, y_indices, train, p_gen_aux)
+    return _loss(batched_forward_gpt2, avg_cross_entropy_loss, params, y, y_mask, y_indices, train)
 
 def t_loss(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
-    return _loss(t_batched_forward_gpt2, t_avg_cross_entropy_loss, params, y, y_mask, y_indices, train, p_gen_aux)
+    fwd_fn = partial(t_batched_forward_gpt2, p_gen_aux=p_gen_aux)
+    return _loss(fwd_fn, t_avg_cross_entropy_loss, params, y, y_mask, y_indices, train)
     
-def _loss(fwd_fn, celoss_fn, params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
+def _loss(fwd_fn, celoss_fn, params, y, y_mask, y_indices, train):  # inputs: BS x N
     y_in = y[:, :-1]
     y_out = y[:, 1:]
     
     # TODO: write it without copying memory? is it possible? 
-    logits = fwd_fn(params, y_in, y_mask, y_indices, train, p_gen_aux) 
+    logits = fwd_fn(params, y_in, y_mask, y_indices, train)
     loss_val, tokens_count = celoss_fn(y_out, logits)
     acc = accuracy(y_out, logits) # TODO: Do I need to stop_gradient on this? I think not, but double-check
     return loss_val, (loss_val, acc, tokens_count/y_out.numel()) # TODO: this is wrapping, but we could make use of jax.value_and_grad instead
