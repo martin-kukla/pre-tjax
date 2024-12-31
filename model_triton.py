@@ -552,7 +552,6 @@ def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True, p_gen_aux=None):
     for i in reversed(range(1, len(layers_jacs_p))):
         layers_jacs_x[i-1]=torch.einsum('abcdef, defghi -> abcghi',layers_jacs_x[i], layers_jacs_x[i-1])
         layers_jacs_p[i-1] = _mult_jacs_in_2d(layers_jacs_x[i], layers_jacs_p[i-1], y)
-    print(f'layers_jacs_x[0].shape', layers_jacs_x[0].shape, 'jac_dropout.shape', jac_dropout.shape)
     jac_dropout = torch.einsum('abcdef, defghi -> abcghi', layers_jacs_x[0], jac_dropout)
     jac_pos_enc[0] =torch.einsum('abcdef, defgh -> abcgh', jac_dropout, jac_pos_enc[0])
     jac_embed[0] = torch.einsum('abcdef, defgh -> abcgh', jac_dropout, jac_embed[0])
