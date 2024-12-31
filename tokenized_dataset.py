@@ -48,11 +48,14 @@ def load_tokenized_dataset():
     ds = ds.map(encode_batch_map_func, batched=True, num_proc=12, batch_size=50) 
     return ds, (tokenize, detokenize, len(state[0][0])) # dataset, tokenizer_state (..,.., vocab_len)
     
-def load_tokenized_dataset_gpt2(split="train"):
+def load_tokenized_dataset_gpt2(split="train", test=False):
     ds = load_fineweb_edu_dataset(split)
     
     # Load tokenizer + map
-    tokenizer_filename = "bpe_tokenizer_fineweb-edu_sample-10BT_100k_ds_merges_30k.pickle"
+    if test:
+        tokenizer_filename = "bpe_tokenizer_fineweb-edu_sample-10BT_10k_ds_merges_3k.pickle"
+    else:
+        tokenizer_filename = "bpe_tokenizer_fineweb-edu_sample-10BT_100k_ds_merges_30k.pickle"
     print(f'Loading tokenizer {tokenizer_filename}')
     (tokenize, detokenize), state = load_bpe_tokenizer(f'tokenizers/{tokenizer_filename}')
 
