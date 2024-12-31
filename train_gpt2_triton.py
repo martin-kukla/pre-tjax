@@ -60,9 +60,9 @@ train=False # TODO: play with
 y_in = y[:, :-1]
 logits_torch_logits = batched_forward_gpt2(params, y_in, y_mask, y_indices, train) 
 logits_triton = t_batched_forward_gpt2(params, y_in, y_mask, y_indices, train) 
-print(logits_torch_logits[0][0])
-print(logits_triton[0][0])
-torch.all(logits_torch_logits == logits_triton)
+#print(logits_torch_logits[0][0])
+#print(logits_triton[0][0])
+assert torch.all(logits_torch_logits == logits_triton)
 
 # # Testing Memory Usage. I decided not to get too deep into it, since this uses torch.grad + torch.compile..
 # TODO XXX: It's still puzzling that the maximum batch_size which torchfunc's version can do is 8 in comparison to 16 by JAX...
