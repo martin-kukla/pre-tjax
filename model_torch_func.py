@@ -7,18 +7,20 @@ import torch
 
 ### PARAMS 
 
+DEVICE = "cuda"
+
 def init_linear_layer(m, n, scale=INIT_SCALE): 
-    return scale * torch.randn((n, m), device="cuda"), torch.zeros((n,), device="cuda")
+    return scale * torch.randn((n, m), device=DEVICE), torch.zeros((n,), device=DEVICE)
 
 def init_proj_layer(emb_dim, proj_dim, scale=INIT_SCALE):
-    return scale * torch.randn((proj_dim, emb_dim), device="cuda")
+    return scale * torch.randn((proj_dim, emb_dim), device=DEVICE)
 
 def init_layernorm_layer(n, scale=INIT_SCALE):
-    return torch.ones((n, ), device="cuda"), torch.zeros((n,), device="cuda")
+    return torch.ones((n, ), device=DEVICE), torch.zeros((n,), device=DEVICE)
 
 def init_tlayer_attn_heads(emb_dim, num_heads, scale=INIT_SCALE): 
     proj_dim = int(emb_dim / num_heads)
-    return scale * torch.randn((num_heads, 3, proj_dim, emb_dim), device="cuda") # 3 for each of qkv
+    return scale * torch.randn((num_heads, 3, proj_dim, emb_dim), device=DEVICE) # 3 for each of qkv
 
 def init_tlayer_attn(emb_dim, num_heads, residual_scale=INIT_SCALE):
     return (init_tlayer_attn_heads(emb_dim, num_heads), ) + (init_proj_layer(emb_dim, emb_dim, residual_scale),)
