@@ -106,6 +106,9 @@ def _vjp_in_2d(v, jac):
     res = torch.matmul(v.reshape((1, -1)), jac.reshape((v.numel(), -1)))
     return res.reshape(outdim)
 
+def _vjps_in_2d(v, jacs): # TODO XXX: reshape v once for all to speed up computation?
+    return [_vjp_in_2d(v, j) for j in jacs] 
+
 def t_linear_bkwd2_p(dloss_dx, layer_params, x): # input: N x D
     outdim = layer_params[1].shape[0]
 
@@ -595,6 +598,52 @@ def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True, p_gen_aux=None):
 
     return tuple([jac_embed, jac_pos_enc] + layers_jacs_p + [jac_layernorm_p])
 
+# WIP. TODO: change mult jacs into vjp
+def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
+    if not train: # as there are 3 dropouts per tlayer
+        p_gen_aux = [None] + [None] * 3 * (len(params) - 3)    
+    
+    indices = torch.arange(y.shape[1], device=y.device).unsqueeze(0).expand(*y.shape) # we ignore indices arg
+    jac_embed = t_embed_bkwd(params[0], y)
+    # Due to tying of embedding and final projection layers,
+    # we need to fill zeroed gradient with respect to biases:
+    jac_embed = [jac_embed[0], torch.zeros(jac_embed[0].shape[:-1], device=y.device)]
+    y = t_embed_fwd(params[0], y)
+    # Reuse t_embed_bkwd to compute jacobian of pos_encoding
+    # Need to account for lack of  1/ sqrt(emb_dim)
+    jac_pos_enc = list(t_embed_bkwd(params[1], indices))
+    jac_pos_enc[0][jac_pos_enc[0]!=0] = 1
+    jac_dropout = t_dropout_bkwd(y + params[1][0], train, p_gen_aux[0])
+    y = t_dropout_fwd(y + params[1][0], train, p_gen_aux[0])
+    
+    layers_jacs_p = []
+    layers_jacs_x = []
+    
+    for i, layer_params in enumerate(params[2:-1]):
+        layer_p_gen_aux = p_gen_aux[1+i*3:1+(i+1)*3]
+        layers_jacs_p.append(t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train, layer_p_gen_aux))
+        layers_jacs_x.append(t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train, layer_p_gen_aux))
+        y = t_gpt2_tlayer_fwd(layer_params, y, mask, train, layer_p_gen_aux)
+    jac_layernorm_p = t_layernorm_bkwd_p(params[-1], y)
+    jac_layernorm_x = t_layernorm_bkwd_x(params[-1], y)    
+    y = t_layernorm_fwd(params[-1], y)
+    
+    # Propoagate back
+    layers_jacs_x[-1]=torch.einsum('abcdef, defghi -> abcghi', jac_layernorm_x, layers_jacs_x[-1])
+    layers_jacs_p[-1] = _mult_jacs_in_2d(jac_layernorm_x, layers_jacs_p[-1], y)
+    for i in reversed(range(1, len(layers_jacs_p))):
+        layers_jacs_x[i-1]=torch.einsum('abcdef, defghi -> abcghi',layers_jacs_x[i], layers_jacs_x[i-1])
+        layers_jacs_p[i-1] = _mult_jacs_in_2d(layers_jacs_x[i], layers_jacs_p[i-1], y)
+    jac_dropout = torch.einsum('abcdef, defghi -> abcghi', layers_jacs_x[0], jac_dropout)
+    jac_pos_enc[0] =torch.einsum('abcdef, defgh -> abcgh', jac_dropout, jac_pos_enc[0])
+    jac_embed[0] = torch.einsum('abcdef, defgh -> abcgh', jac_dropout, jac_embed[0])
+    # Note, no need to propagate for jac_embed[1], since it's zeroeed 
+
+    jac = [jac_embed, jac_pos_enc] + layers_jacs_p + [jac_layernorm_p]
+    for i in range(len(jac)):
+        jac[i] = _vjps_in_2d(dloss_dx, jac[i])
+    return tuple(jac)
+
 def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
     y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
     
@@ -617,17 +666,14 @@ def t_gpt2_bkwd_p(params, y, y_mask, y_indices, train, p_gen_aux=None): # input:
     return tuple(jac)
 
 def t_gpt2_bkwd2_p(dloss_dx, params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
-    jac = t_gpt2_tlayers_bkwd_p(params, y, y_mask, y_indices, train, p_gen_aux)
+    y0 = y
     y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
     
     linear_dloss_dp = t_linear_bkwd2_p(dloss_dx, params[0], y)    
     dloss_dx = t_linear_bkwd2_x(dloss_dx, params[0], y)
     
-    jac = list(jac)
-    for i in range(len(jac)):
-        jac[i] = _mult_jacs_in_2d(dloss_dx, jac[i], y)
-    
-    dloss_dp = list(jac)
+    dloss_dp = t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y0, y_mask, y_indices, train, p_gen_aux)    
+    dloss_dp = list(dloss_dp)
     
     # As we tie embedding and last projection weights (no need to add jac[0][1] as it's zeroed)
     dloss_dp[0] = (dloss_dp[0][0] + linear_dloss_dp[0], linear_dloss_dp[1])
