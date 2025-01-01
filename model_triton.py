@@ -620,17 +620,17 @@ def t_gpt2_bkwd2_p(dloss_dx, params, y, y_mask, y_indices, train, p_gen_aux=None
     jac = t_gpt2_tlayers_bkwd_p(params, y, y_mask, y_indices, train, p_gen_aux)
     y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
     
-    jac_linear_x = t_linear_bkwd2_x(dloss_dx, params[0], y)
-    jac_linear_p = t_linear_bkwd2_p(dloss_dx, params[0], y)    
+    linear_dloss_dp = t_linear_bkwd2_p(dloss_dx, params[0], y)    
+    dloss_dx = t_linear_bkwd2_x(dloss_dx, params[0], y)
     
     jac = list(jac)
     for i in range(len(jac)):
-        jac[i] = _mult_jacs_in_2d(jac_linear_x, jac[i], y)
+        jac[i] = _mult_jacs_in_2d(dloss_dx, jac[i], y)
     
     dloss_dp = list(jac)
     
     # As we tie embedding and last projection weights (no need to add jac[0][1] as it's zeroed)
-    dloss_dp[0] = (dloss_dp[0][0] + jac_linear_p[0], jac_linear_p[1])
+    dloss_dp[0] = (dloss_dp[0][0] + linear_dloss_dp[0], linear_dloss_dp[1])
         
     return tuple(dloss_dp)
 
