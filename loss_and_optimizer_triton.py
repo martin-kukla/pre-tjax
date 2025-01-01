@@ -13,7 +13,7 @@ import math
 import torch
 from torch.func import grad
 from model_torch_func import log_softmax, batched_forward_gpt2
-from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_log_softmax_bkwd2, t_batched_forward_gpt2, t_gpt2_forward, t_gpt2_bkwd_p, _mult_jacs_in_2d
+from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_log_softmax_bkwd2, t_batched_forward_gpt2, t_gpt2_forward, t_gpt2_bkwd_p, t_gpt2_bkwd2_p, _mult_jacs_in_2d
 
 def avg_cross_entropy_loss(y_labels, x_logits):
     return _avg_cross_entropy_loss(log_softmax, y_labels, x_logits)
@@ -111,6 +111,20 @@ def t_loss_bkwd(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs:
     for i in range(len(dloss_dp)):
         dloss_dp[i] = _mult_jacs_in_2d(jac_celoss, dloss_dp[i], logits)
     return dloss_dp, (loss_val, acc, tokens_count/y_out.numel())
+
+def t_loss_bkwd2(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N    
+    y_in = y[:, :-1]
+    y_out = y[:, 1:]
+     
+    logits = t_gpt2_forward(params, y_in, y_mask, y_indices, train, p_gen_aux) 
+    
+    dloss_dx = t_avg_cross_entropy_loss_bkwd2(y_out, logits)
+    dloss_dx = t_gpt2_bkwd2_p(dloss_dx, params, y_in, y_mask, y_indices, train, p_gen_aux)
+    
+    loss_val, tokens_count = t_avg_cross_entropy_loss(y_out, logits)
+    acc = accuracy(y_out, logits)
+    
+    return dloss_dx, (loss_val, acc, tokens_count/y_out.numel())
 
 # print(f'iter #{i} loss {loss_train(params, jnp.array(x[:1]), jnp.array(y[:1]), random.PRNGKey(0))[0] }')
 

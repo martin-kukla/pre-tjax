@@ -600,6 +600,28 @@ def t_gpt2_bkwd_p(params, y, y_mask, y_indices, train, p_gen_aux=None): # input:
     jac[0] = (jac[0][0] + jac_linear_p[0], jac_linear_p[1])
     return tuple(jac)
 
+def t_gpt2_bkwd2_p(dloss_dx, params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
+    jac = t_gpt2_tlayers_bkwd_p(params, y, y_mask, y_indices, train, p_gen_aux)
+    y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
+    
+    jac_linear_x = t_linear_bkwd_x(params[0], y) 
+    jac_linear_p = t_linear_bkwd_p(params[0], y)    
+    
+    jac = list(jac)
+    for i in range(len(jac)):
+        jac[i] = _mult_jacs_in_2d(jac_linear_x, jac[i], y)
+    
+    # As we tie embedding and last projection weights (no need to add jac[0][1] as it's zeroed)
+    jac[0] = (jac[0][0] + jac_linear_p[0], jac_linear_p[1])
+    
+    dloss_dp = list(jac)
+    for i in range(len(dloss_dp)):
+        # TODO XXX: below can be replaces with mult V with JAC,
+        # then no need to pass third paramter either.
+        dloss_dp[i] = _mult_jacs_in_2d(dloss_dx, dloss_dp[i], dloss_dx)
+        
+    return tuple(dloss_dp)
+
 
 #t_batched_forward_gpt2 = torch.vmap(t_forward_gpt2, in_dims=(None, 0, 0, 0, None), randomness="different") # TODO XXX: output will be batched unlike JAX's vmap
 t_batched_forward_gpt2 = t_gpt2_forward # TODO XXX: rename the left one too
