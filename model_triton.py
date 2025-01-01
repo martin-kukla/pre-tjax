@@ -101,6 +101,19 @@ def t_linear_bkwd_p(layer_params, x): # input: N x D
     jac2 = torch.eye(outdim, device=x.device).expand(x.shape[:-1] + (outdim, outdim))
     return jac1, jac2
 
+def _vjp_in_2d(v, jac):
+    outdim = jac.shape[len(v.shape):]
+    res = torch.matmul(v.reshape((1, -1)), jac.reshape((v.numel(), -1)))
+    return res.reshape(outdim)
+
+def t_linear_bkwd2_p(dloss_dx, layer_params, x): # input: N x D
+    outdim = layer_params[1].shape[0]
+
+    jac1 = t_proj_bkwd_p(layer_params[0], x)
+    jac2 = torch.eye(outdim, device=x.device).expand(x.shape[:-1] + (outdim, outdim))
+        
+    return _vjp_in_2d(dloss_dx, jac1), _vjp_in_2d(dloss_dx, jac2)
+
 def t_linear_bkwd_x(layer_params, x): # input: seq_len x emb_dim
     return t_proj_bkwd_x(layer_params[0], x)
 
@@ -605,20 +618,20 @@ def t_gpt2_bkwd2_p(dloss_dx, params, y, y_mask, y_indices, train, p_gen_aux=None
     y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
     
     jac_linear_x = t_linear_bkwd_x(params[0], y) 
-    jac_linear_p = t_linear_bkwd_p(params[0], y)    
+    jac_linear_p = t_linear_bkwd2_p(dloss_dx, params[0], y)    
     
     jac = list(jac)
     for i in range(len(jac)):
         jac[i] = _mult_jacs_in_2d(jac_linear_x, jac[i], y)
-    
-    # As we tie embedding and last projection weights (no need to add jac[0][1] as it's zeroed)
-    jac[0] = (jac[0][0] + jac_linear_p[0], jac_linear_p[1])
     
     dloss_dp = list(jac)
     for i in range(len(dloss_dp)):
         # TODO XXX: below can be replaces with mult V with JAC,
         # then no need to pass third paramter either.
         dloss_dp[i] = _mult_jacs_in_2d(dloss_dx, dloss_dp[i], dloss_dx)
+    
+    # As we tie embedding and last projection weights (no need to add jac[0][1] as it's zeroed)
+    dloss_dp[0] = (dloss_dp[0][0] + jac_linear_p[0], jac_linear_p[1])
         
     return tuple(dloss_dp)
 
