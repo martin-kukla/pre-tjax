@@ -114,8 +114,11 @@ def t_linear_bkwd2_p(dloss_dx, layer_params, x): # input: N x D
         
     return _vjp_in_2d(dloss_dx, jac1), _vjp_in_2d(dloss_dx, jac2)
 
-def t_linear_bkwd_x(layer_params, x): # input: seq_len x emb_dim
+def t_linear_bkwd_x(layer_params, x): # input: N x D
     return t_proj_bkwd_x(layer_params[0], x)
+
+def t_linear_bkwd2_x(dloss_dx, layer_params, x): # input: N x D
+    return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params[0], x))
 
 def t_proj_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params, -2, -1)) # since layer_params is ... x output_dim x emb_dim
@@ -617,7 +620,7 @@ def t_gpt2_bkwd2_p(dloss_dx, params, y, y_mask, y_indices, train, p_gen_aux=None
     jac = t_gpt2_tlayers_bkwd_p(params, y, y_mask, y_indices, train, p_gen_aux)
     y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
     
-    jac_linear_x = t_linear_bkwd_x(params[0], y) 
+    jac_linear_x = t_linear_bkwd2_x(dloss_dx, params[0], y)
     jac_linear_p = t_linear_bkwd2_p(dloss_dx, params[0], y)    
     
     jac = list(jac)
@@ -625,10 +628,6 @@ def t_gpt2_bkwd2_p(dloss_dx, params, y, y_mask, y_indices, train, p_gen_aux=None
         jac[i] = _mult_jacs_in_2d(jac_linear_x, jac[i], y)
     
     dloss_dp = list(jac)
-    for i in range(len(dloss_dp)):
-        # TODO XXX: below can be replaces with mult V with JAC,
-        # then no need to pass third paramter either.
-        dloss_dp[i] = _mult_jacs_in_2d(dloss_dx, dloss_dp[i], dloss_dx)
     
     # As we tie embedding and last projection weights (no need to add jac[0][1] as it's zeroed)
     dloss_dp[0] = (dloss_dp[0][0] + jac_linear_p[0], jac_linear_p[1])
