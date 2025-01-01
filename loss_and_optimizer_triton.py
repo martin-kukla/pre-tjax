@@ -13,7 +13,7 @@ import math
 import torch
 from torch.func import grad
 from model_torch_func import log_softmax, batched_forward_gpt2
-from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_batched_forward_gpt2, t_gpt2_forward, t_gpt2_bkwd_p, _mult_jacs_in_2d
+from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_log_softmax_bkwd2, t_batched_forward_gpt2, t_gpt2_forward, t_gpt2_bkwd_p, _mult_jacs_in_2d
 
 def avg_cross_entropy_loss(y_labels, x_logits):
     return _avg_cross_entropy_loss(log_softmax, y_labels, x_logits)
@@ -41,6 +41,19 @@ def t_avg_cross_entropy_loss_bkwd(y_labels, x_logits):
     jac_x_logits = torch.einsum("a, abc -> bc", jac_nanmean, jac_softmax)
     
     return jac_x_logits.reshape(x_logits.shape)
+
+def t_avg_cross_entropy_loss_bkwd2(y_labels, x_logits):
+    y_labels_1d = y_labels.reshape((-1,))
+    x_logits_2d = x_logits.reshape((y_labels.numel(), -1))
+    elements_loss = t_log_softmax_fwd(x_logits_2d)[(torch.arange(y_labels.numel()), y_labels_1d)]
+    elements_loss = torch.where(y_labels_1d != 0, elements_loss, float('nan'))
+    
+    # TODO XXX: code up derivative for torch.nanmean
+    dloss_dx = -torch.func.jacrev(torch.nanmean)(elements_loss) 
+    
+    dloss_dx = t_log_softmax_bkwd2(dloss_dx, x_logits_2d)[(torch.arange(y_labels.numel()), y_labels_1d)]
+    
+    return dloss_dx.reshape(x_logits.shape)
 
 def accuracy(y_labels, x_logits):
     return torch.nanmean(torch.where(y_labels!=0, y_labels == torch.argmax(x_logits, axis=-1), float('nan')))

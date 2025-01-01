@@ -37,6 +37,26 @@ def t_log_softmax_bkwd(x_logits):
     jac = (exp_logsums * jac_eye + jac) / exp_logsums
     return torch.block_diag(*jac.unbind(0)).reshape(indims+indims)
 
+def t_log_softmax_bkwd2(dloss_dx, x_logits):
+    indims = x_logits.shape
+    x_logits = x_logits.reshape((-1, x_logits.shape[-1]))
+    
+    BS, N = x_logits.shape
+    
+    x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0]
+    logsums = torch.logsumexp(x_logits, axis=-1, keepdims=True)
+    exp_logsums = torch.exp(logsums).unsqueeze(2) # Q: is it going to be numerically stable?
+    
+    # TODO XXX: can I use expand for the below line?
+    jac = torch.repeat_interleave(-torch.exp(x_logits), N, dim=0, output_size=x_logits.numel())
+    jac = jac.reshape(BS, N, N)
+    jac_eye = torch.eye(N, device=x_logits.device).unsqueeze(0).expand(BS, N, N)
+    jac = (exp_logsums * jac_eye + jac) / exp_logsums
+    jac_softmax = torch.block_diag(*jac.unbind(0)).reshape(indims+indims)
+    
+    dloss_dx = torch.einsum("c, abcd -> abd", dloss_dx, jac_softmax)
+    return dloss_dx
+
 def t_embed_fwd(layer_params, x): # input: 1 x
     return layer_params[0][x] * math.sqrt(layer_params[0].shape[1]) # since layer_params[0] is vocab_size x emb_dim
 
