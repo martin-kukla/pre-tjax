@@ -479,6 +479,26 @@ def t_gpt2_tlayer_sublock1_bkwd_p(layer_params, y, mask, train=True, p_gen_aux=N
     jac_layernorm_p = [torch.einsum("xabcdef, defg->abcg", jac_tlayer_attn_x, j) for j in jac_layernorm_p]
     return tuple(jac_layernorm_p + jac_tlayer_attn_p)
 
+def t_gpt2_tlayer_sublock1_bkwd2_p(dloss_dx, layer_params, y, mask, train=True, p_gen_aux=None): # input: seq_len x emb_dim
+    if not train:
+        p_gen_aux = [None, None]
+        
+    y_diff = t_layernorm_fwd(layer_params[:2], y)
+    jac_layernorm_p = t_layernorm_bkwd_p(layer_params[:2], y)
+    y_diff_attn = t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    y = y + t_dropout_fwd(y_diff_attn, train, p_gen_aux[1])
+
+    jac_dropout = t_dropout_bkwd(y_diff_attn, train, p_gen_aux[1])
+    jac_tlayer_attn_p = t_tlayer_attn_bkwd_p(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    jac_tlayer_attn_x = t_tlayer_attn_bkwd_x(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    
+    jac_tlayer_attn_p = _mult_jacs_in_2d(jac_dropout, jac_tlayer_attn_p, y_diff_attn)
+    jac_tlayer_attn_x = _mult_jacs_in_2d(jac_dropout, jac_tlayer_attn_x, y_diff_attn)
+    
+    jac_tlayer_attn_x = torch.stack(jac_tlayer_attn_x)
+    jac_layernorm_p = [torch.einsum("xabcdef, defg->abcg", jac_tlayer_attn_x, j) for j in jac_layernorm_p]
+    return tuple(_vjps_in_2d(dloss_dx, jac_layernorm_p + jac_tlayer_attn_p))
+
 def t_gpt2_tlayer_sublock1_bkwd_x(layer_params, y, mask, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     if not train:
         p_gen_aux = [None, None]
@@ -594,12 +614,12 @@ def t_gpt2_tlayer_bkwd2_p(dloss_dx, layer_params, y, mask, train=True, p_gen_aux
         p_gen_aux = [None, None, None] 
         
     y_in = y
-    jac_subblock1_p = t_gpt2_tlayer_sublock1_bkwd_p(layer_params[:-6], y, mask, train, p_gen_aux[:2])
     y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train, p_gen_aux[:2])
     subblock2_dloss_dp = t_gpt2_tlayer_sublock2_bkwd2_p(dloss_dx, layer_params[-6:], y, train, p_gen_aux[2])
     dloss_dx = t_gpt2_tlayer_sublock2_bkwd2_x(dloss_dx, layer_params[-6:], y, train, p_gen_aux[2])
+    subblock1_dloss_dp = t_gpt2_tlayer_sublock1_bkwd2_p(dloss_dx, layer_params[:-6], y_in, mask, train, p_gen_aux[:2])
     
-    return tuple(_vjps_in_2d(dloss_dx, jac_subblock1_p)) + subblock2_dloss_dp
+    return subblock1_dloss_dp + subblock2_dloss_dp
 
 def t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
     if not train:
