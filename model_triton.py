@@ -640,7 +640,6 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
         y = t_gpt2_tlayer_fwd(layer_params, y, mask, train, layer_p_gen_aux)
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, params[-1], y)
     jac_layernorm_x = t_layernorm_bkwd_x(params[-1], y)    
-    y = t_layernorm_fwd(params[-1], y)
     
     # Propoagate back
     layers_jacs_x[-1]=torch.einsum('abcdef, defghi -> abcghi', jac_layernorm_x, layers_jacs_x[-1])
