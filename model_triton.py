@@ -661,7 +661,6 @@ def t_gpt2_tlayers_bkwd_p(params, y, mask, indices, train=True, p_gen_aux=None):
 
     return tuple([jac_embed, jac_pos_enc] + layers_jacs_p + [jac_layernorm_p])
 
-# WIP. TODO: change mult jacs into vjp
 def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
     if not train: # as there are 3 dropouts per tlayer
         p_gen_aux = [None] + [None] * 3 * (len(params) - 3)    
@@ -699,6 +698,7 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     # we need to fill zeroed gradient with respect to biases:
     embed_dloss_dp = [embed_dloss_dp[0], torch.zeros(embed_dloss_dp[0].shape[:-1], device=y_in.device)]
     
+    # TODO XXX: code up bkwd2 for pos_enc, so we don't reuse t_embed_bkwd
     # Reuse t_embed_bkwd to compute jacobian of pos_encoding
     # Need to account for lack of  1/ sqrt(emb_dim)
     jac_pos_enc = list(t_embed_bkwd(params[1], indices))
