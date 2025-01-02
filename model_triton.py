@@ -387,9 +387,23 @@ def t_layernorm_bkwd_p(layer_params, x):
     jac2 = torch.eye(outdim, device=x.device).expand(x_indims[:-1] + (outdim, outdim))
     return jac1 *jac1_aux, jac2
 
+def t_layernorm_bkwd2_p(dloss_dx, layer_params, x):
+    x_indims = x.shape
+    N = x.shape[-1]
+    outdim=layer_params[1].shape[0]
+    
+    
+    x_mean = torch.mean(x, axis=-1, keepdims=True)
+    x_std = torch.std(x, axis=-1, keepdims=True)
+    jac1 = ((x-x_mean)/x_std).unsqueeze(-1).expand(x_indims + (N, ))
+    jac1_aux = torch.eye(N, device=x.device) # just used for reshaping
+    jac2 = torch.eye(outdim, device=x.device).expand(x_indims[:-1] + (outdim, outdim))
+    
+    return _vjp_in_2d(dloss_dx, jac1 *jac1_aux), _vjp_in_2d(dloss_dx, jac2)
+
 def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
     # Note, below is "shorten Jacobian": rows are independent, so zeros in result are skipped.
-    def std_bkwd(x): 
+    def std_bkwd(x):
         N = x.shape[-1]
         x_mean = torch.mean(x, axis=-1, keepdims=True)
         x_std = torch.std(x, axis=-1, keepdims = True)
@@ -624,7 +638,7 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
         layers_jacs_p.append(t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train, layer_p_gen_aux))
         layers_jacs_x.append(t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train, layer_p_gen_aux))
         y = t_gpt2_tlayer_fwd(layer_params, y, mask, train, layer_p_gen_aux)
-    jac_layernorm_p = t_layernorm_bkwd_p(params[-1], y)
+    layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, params[-1], y)
     jac_layernorm_x = t_layernorm_bkwd_x(params[-1], y)    
     y = t_layernorm_fwd(params[-1], y)
     
@@ -639,9 +653,10 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     jac_embed[0] = torch.einsum('abcdef, defgh -> abcgh', jac_dropout, jac_embed[0])
     # Note, no need to propagate for jac_embed[1], since it's zeroeed 
 
-    jac = [jac_embed, jac_pos_enc] + layers_jacs_p + [jac_layernorm_p]
+    jac = [jac_embed, jac_pos_enc] + layers_jacs_p
     for i in range(len(jac)):
         jac[i] = _vjps_in_2d(dloss_dx, jac[i])
+    jac = jac + [layernorm_dloss_dp]
     return tuple(jac)
 
 def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
