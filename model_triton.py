@@ -74,6 +74,23 @@ def t_embed_bkwd(layer_params, x): # input: 1 x
     
     return (jac.reshape( x.shape + (emb_size, layer_params[0].shape[0], layer_params[0].shape[1])), )
 
+def t_embed_bkwd2(dloss_dx, layer_params, x): # input: 1 x
+    x_1d = x.reshape(-1)
+    
+    emb_size = layer_params[0].shape[1]    
+    fn_outdim = torch.numel(x) * emb_size
+    fn_indim =  torch.numel(layer_params[0]) # jacobian with respect to params
+    jac = torch.zeros(fn_outdim, fn_indim, device=x.device)
+    
+    indices = torch.tile(torch.arange(emb_size, device=x.device), (x.numel(), 1))
+    indices = ((x_1d * emb_size).unsqueeze(1) + indices).reshape(-1, 1)
+    jac.scatter_(1, indices, math.sqrt(emb_size))
+    
+    jac = jac.reshape( x.shape + (emb_size, layer_params[0].shape[0], layer_params[0].shape[1]))
+    
+    return (_vjp_in_2d(dloss_dx, jac), )
+    
+
 def t_relu_fwd(x):
     return torch.where(torch.le(x, 0), 0, x) # as inputs are broadcastable in where&le - follows pytorch's implementation
 
@@ -677,22 +694,19 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     # dropout + embed + pos_enc
     dloss_dx = _vjp_in_2d(dloss_dx, jac_dropout)
     
-    jac_embed = t_embed_bkwd(params[0], y_in)
+    embed_dloss_dp = t_embed_bkwd2(dloss_dx, params[0], y_in)
     # Due to tying of embedding and final projection layers,
     # we need to fill zeroed gradient with respect to biases:
-    jac_embed = [jac_embed[0], torch.zeros(jac_embed[0].shape[:-1], device=y_in.device)]
+    embed_dloss_dp = [embed_dloss_dp[0], torch.zeros(embed_dloss_dp[0].shape[:-1], device=y_in.device)]
     
     # Reuse t_embed_bkwd to compute jacobian of pos_encoding
     # Need to account for lack of  1/ sqrt(emb_dim)
     jac_pos_enc = list(t_embed_bkwd(params[1], indices))
     jac_pos_enc[0][jac_pos_enc[0]!=0] = 1
-    
     jac_pos_enc[0] =_vjp_in_2d(dloss_dx, jac_pos_enc[0])
-    jac_embed[0] = _vjp_in_2d(dloss_dx, jac_embed[0])
-    # Note, no need to propagate for jac_embed[1], since it's zeroeed 
 
-    jac = [jac_embed, jac_pos_enc] + layers_dloss_dp + [layernorm_dloss_dp]
-    return tuple(jac)
+    dloss_dp = [embed_dloss_dp, jac_pos_enc] + layers_dloss_dp + [layernorm_dloss_dp]
+    return tuple(dloss_dp)
 
 def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
     y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
