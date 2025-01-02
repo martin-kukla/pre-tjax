@@ -551,6 +551,24 @@ def t_gpt2_tlayer_sublock2_bkwd_x(layer_params, y, train=True, p_gen_aux=None): 
     jac_y_diff = torch.einsum("abcdef, defghi->abcghi", jac_tlayer_ffn_x, jac_layernorm_x)
     return jac_y.reshape(jac_y_diff.shape) + jac_y_diff
 
+def t_gpt2_tlayer_sublock2_bkwd2_x(dloss_dx, layer_params, y, train=True, p_gen_aux=None): # input: seq_len x emb_dim
+    y_diff = t_layernorm_fwd(layer_params[:2], y)
+    jac_layernorm_x = t_layernorm_bkwd_x(layer_params[:2], y)
+    y_diff_ffn = t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd)
+    y = y + t_dropout_fwd(y_diff_ffn, train, p_gen_aux)
+    
+    jac_dropout = t_dropout_bkwd(y_diff_ffn, train, p_gen_aux)
+    jac_tlayer_ffn_x = t_tlayer_ffn_bkwd_x(layer_params[2:], y_diff, t_gelu_fwd)
+    
+    # TODO XXX: Figure out how to reliably test addition of the below line
+    jac_tlayer_ffn_x = _mult_jacs_in_2d(jac_dropout, [jac_tlayer_ffn_x], y_diff_ffn)[0]
+    
+    jac_y = torch.eye(y.numel(), device=y.device)    
+    jac_y_diff = torch.einsum("abcdef, defghi->abcghi", jac_tlayer_ffn_x, jac_layernorm_x)
+    jac = jac_y.reshape(jac_y_diff.shape) + jac_y_diff
+    
+    return _vjp_in_2d(dloss_dx, jac)
+
 def t_gpt2_tlayer_fwd(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
     if not train:
         p_gen_aux = [None, None, None] 
@@ -575,12 +593,12 @@ def t_gpt2_tlayer_bkwd2_p(dloss_dx, layer_params, y, mask, train=True, p_gen_aux
     if not train:
         p_gen_aux = [None, None, None] 
         
+    y_in = y
     jac_subblock1_p = t_gpt2_tlayer_sublock1_bkwd_p(layer_params[:-6], y, mask, train, p_gen_aux[:2])
     y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train, p_gen_aux[:2])
     subblock2_dloss_dp = t_gpt2_tlayer_sublock2_bkwd2_p(dloss_dx, layer_params[-6:], y, train, p_gen_aux[2])
-    jac_subblock2_x = t_gpt2_tlayer_sublock2_bkwd_x(layer_params[-6:], y, train, p_gen_aux[2])
+    dloss_dx = t_gpt2_tlayer_sublock2_bkwd2_x(dloss_dx, layer_params[-6:], y, train, p_gen_aux[2])
     
-    jac_subblock1_p = _mult_jacs_in_2d(jac_subblock2_x, jac_subblock1_p, y)
     return tuple(_vjps_in_2d(dloss_dx, jac_subblock1_p)) + subblock2_dloss_dp
 
 def t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
