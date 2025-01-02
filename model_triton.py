@@ -649,16 +649,9 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     if not train: # as there are 3 dropouts per tlayer
         p_gen_aux = [None] + [None] * 3 * (len(params) - 3)    
     
+    y_in = y
     indices = torch.arange(y.shape[1], device=y.device).unsqueeze(0).expand(*y.shape) # we ignore indices arg
-    jac_embed = t_embed_bkwd(params[0], y)
-    # Due to tying of embedding and final projection layers,
-    # we need to fill zeroed gradient with respect to biases:
-    jac_embed = [jac_embed[0], torch.zeros(jac_embed[0].shape[:-1], device=y.device)]
     y = t_embed_fwd(params[0], y)
-    # Reuse t_embed_bkwd to compute jacobian of pos_encoding
-    # Need to account for lack of  1/ sqrt(emb_dim)
-    jac_pos_enc = list(t_embed_bkwd(params[1], indices))
-    jac_pos_enc[0][jac_pos_enc[0]!=0] = 1
     jac_dropout = t_dropout_bkwd(y + params[1][0], train, p_gen_aux[0])
     y = t_dropout_fwd(y + params[1][0], train, p_gen_aux[0])
     
@@ -669,9 +662,11 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
         y = t_gpt2_tlayer_fwd(layer_params, y, mask, train, layer_p_gen_aux)
     
     # Propoagate back    
+    # layernorm
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, params[-1], y)
     dloss_dx = t_layernorm_bkwd2_x(dloss_dx, params[-1], y) 
     
+    # layers
     layers_dloss_dp = []
     for i, layer_params in reversed(list(enumerate(params[2:-1]))):
         y, layer_p_gen_aux = layers_inputs[i]
@@ -679,7 +674,19 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
         dloss_dx = t_gpt2_tlayer_bkwd2_x(dloss_dx, layer_params, y, mask, train, layer_p_gen_aux)
     layers_dloss_dp = list(reversed(layers_dloss_dp)) # TODO XXX: clean up list+ reversed combos
     
+    # dropout + embed + pos_enc
     dloss_dx = _vjp_in_2d(dloss_dx, jac_dropout)
+    
+    jac_embed = t_embed_bkwd(params[0], y_in)
+    # Due to tying of embedding and final projection layers,
+    # we need to fill zeroed gradient with respect to biases:
+    jac_embed = [jac_embed[0], torch.zeros(jac_embed[0].shape[:-1], device=y_in.device)]
+    
+    # Reuse t_embed_bkwd to compute jacobian of pos_encoding
+    # Need to account for lack of  1/ sqrt(emb_dim)
+    jac_pos_enc = list(t_embed_bkwd(params[1], indices))
+    jac_pos_enc[0][jac_pos_enc[0]!=0] = 1
+    
     jac_pos_enc[0] =_vjp_in_2d(dloss_dx, jac_pos_enc[0])
     jac_embed[0] = _vjp_in_2d(dloss_dx, jac_embed[0])
     # Note, no need to propagate for jac_embed[1], since it's zeroeed 
