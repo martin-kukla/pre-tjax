@@ -538,6 +538,20 @@ def t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train=True, p_gen_aux=None): # i
     jac_subblock1_p = _mult_jacs_in_2d(jac_subblock2_x, jac_subblock1_p, y)
     return tuple(jac_subblock1_p) + jac_subblock2_p
 
+def t_gpt2_tlayer_bkwd2_p(dloss_dx, layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
+    if not train:
+        p_gen_aux = [None, None, None] 
+        
+    jac_subblock1_p = t_gpt2_tlayer_sublock1_bkwd_p(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    jac_subblock2_p = t_gpt2_tlayer_sublock2_bkwd_p(layer_params[-6:], y, train, p_gen_aux[2])
+    jac_subblock2_x = t_gpt2_tlayer_sublock2_bkwd_x(layer_params[-6:], y, train, p_gen_aux[2])
+    
+    jac_subblock1_p = _mult_jacs_in_2d(jac_subblock2_x, jac_subblock1_p, y)
+    jacs = tuple(jac_subblock1_p) + jac_subblock2_p
+    
+    return tuple(_vjps_in_2d(dloss_dx, jacs)) # TODO XXX: clean up tuple/list bits
+
 def t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
     if not train:
         p_gen_aux = [None, None, None]    
@@ -547,6 +561,17 @@ def t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train=True, p_gen_aux=None): # i
     jac_subblock2_x = t_gpt2_tlayer_sublock2_bkwd_x(layer_params[-6:], y, train, p_gen_aux[2])
       
     return torch.einsum('abcdef, defghi->abcghi', jac_subblock2_x, jac_subblock1_x)
+
+def t_gpt2_tlayer_bkwd2_x(dloss_dx, layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
+    if not train:
+        p_gen_aux = [None, None, None]    
+    
+    jac_subblock1_x = t_gpt2_tlayer_sublock1_bkwd_x(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    jac_subblock2_x = t_gpt2_tlayer_sublock2_bkwd_x(layer_params[-6:], y, train, p_gen_aux[2])
+      
+    jac=torch.einsum('abcdef, defghi->abcghi', jac_subblock2_x, jac_subblock1_x)
+    return _vjp_in_2d(dloss_dx, jac)
 
 def t_gpt2_tlayers_fwd(params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
     if not train: # as there are 3 dropouts per tlayer
@@ -637,23 +662,27 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     jac_dropout = t_dropout_bkwd(y + params[1][0], train, p_gen_aux[0])
     y = t_dropout_fwd(y + params[1][0], train, p_gen_aux[0])
     
-    layers_jacs_p = []
-    layers_jacs_x = []
+    layers_inputs = []
     
     for i, layer_params in enumerate(params[2:-1]):
         layer_p_gen_aux = p_gen_aux[1+i*3:1+(i+1)*3]
-        layers_jacs_p.append(t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train, layer_p_gen_aux))
-        layers_jacs_x.append(t_gpt2_tlayer_bkwd_x(layer_params, y, mask, train, layer_p_gen_aux))
+        layers_inputs.append((y, layer_p_gen_aux))
         y = t_gpt2_tlayer_fwd(layer_params, y, mask, train, layer_p_gen_aux)
-    layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, params[-1], y)
-    dloss_dx = t_layernorm_bkwd2_x(dloss_dx, params[-1], y)    
     
-    # Propoagate back
-    layers_jacs_x[-1]=_vjp_in_2d(dloss_dx, layers_jacs_x[-1])
-    layers_jacs_p[-1] = _vjps_in_2d(dloss_dx, layers_jacs_p[-1])
-    for i in reversed(range(1, len(layers_jacs_p))):
-        layers_jacs_x[i-1]= _vjp_in_2d(layers_jacs_x[i], layers_jacs_x[i-1])
-        layers_jacs_p[i-1] = _vjps_in_2d(layers_jacs_x[i], layers_jacs_p[i-1])
+    # Propoagate back    
+    layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, params[-1], y)
+    dloss_dx = t_layernorm_bkwd2_x(dloss_dx, params[-1], y) 
+    
+    layers_jacs_p = []
+    layers_jacs_x = []
+    for i, layer_params in reversed(list(enumerate(params[2:-1]))):
+        y, layer_p_gen_aux = layers_inputs[i]
+        layers_jacs_p.append(t_gpt2_tlayer_bkwd2_p(dloss_dx, layer_params, y, mask, train, layer_p_gen_aux))
+        layers_jacs_x.append(t_gpt2_tlayer_bkwd2_x(dloss_dx, layer_params, y, mask, train, layer_p_gen_aux))
+        dloss_dx = layers_jacs_x[-1]
+    layers_jacs_p = list(reversed(layers_jacs_p))
+    layers_jacs_x = list(reversed(layers_jacs_x))
+    
     jac_dropout = _vjp_in_2d(layers_jacs_x[0], jac_dropout)
     jac_pos_enc[0] =_vjp_in_2d(jac_dropout, jac_pos_enc[0])
     jac_embed[0] = _vjp_in_2d(jac_dropout, jac_embed[0])
