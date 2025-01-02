@@ -663,7 +663,6 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     y = t_dropout_fwd(y + params[1][0], train, p_gen_aux[0])
     
     layers_inputs = []
-    
     for i, layer_params in enumerate(params[2:-1]):
         layer_p_gen_aux = p_gen_aux[1+i*3:1+(i+1)*3]
         layers_inputs.append((y, layer_p_gen_aux))
@@ -673,22 +672,19 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, params[-1], y)
     dloss_dx = t_layernorm_bkwd2_x(dloss_dx, params[-1], y) 
     
-    layers_jacs_p = []
-    layers_jacs_x = []
+    layers_dloss_dp = []
     for i, layer_params in reversed(list(enumerate(params[2:-1]))):
         y, layer_p_gen_aux = layers_inputs[i]
-        layers_jacs_p.append(t_gpt2_tlayer_bkwd2_p(dloss_dx, layer_params, y, mask, train, layer_p_gen_aux))
-        layers_jacs_x.append(t_gpt2_tlayer_bkwd2_x(dloss_dx, layer_params, y, mask, train, layer_p_gen_aux))
-        dloss_dx = layers_jacs_x[-1]
-    layers_jacs_p = list(reversed(layers_jacs_p))
-    layers_jacs_x = list(reversed(layers_jacs_x))
+        layers_dloss_dp.append(t_gpt2_tlayer_bkwd2_p(dloss_dx, layer_params, y, mask, train, layer_p_gen_aux))
+        dloss_dx = t_gpt2_tlayer_bkwd2_x(dloss_dx, layer_params, y, mask, train, layer_p_gen_aux)
+    layers_dloss_dp = list(reversed(layers_dloss_dp)) # TODO XXX: clean up list+ reversed combos
     
-    jac_dropout = _vjp_in_2d(layers_jacs_x[0], jac_dropout)
-    jac_pos_enc[0] =_vjp_in_2d(jac_dropout, jac_pos_enc[0])
-    jac_embed[0] = _vjp_in_2d(jac_dropout, jac_embed[0])
+    dloss_dx = _vjp_in_2d(dloss_dx, jac_dropout)
+    jac_pos_enc[0] =_vjp_in_2d(dloss_dx, jac_pos_enc[0])
+    jac_embed[0] = _vjp_in_2d(dloss_dx, jac_embed[0])
     # Note, no need to propagate for jac_embed[1], since it's zeroeed 
 
-    jac = [jac_embed, jac_pos_enc] + layers_jacs_p + [layernorm_dloss_dp]
+    jac = [jac_embed, jac_pos_enc] + layers_dloss_dp + [layernorm_dloss_dp]
     return tuple(jac)
 
 def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
