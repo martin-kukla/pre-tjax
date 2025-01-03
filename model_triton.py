@@ -626,17 +626,18 @@ def t_gpt2_tlayer_sublock2_bkwd_x(layer_params, y, train=True, p_gen_aux=None): 
     return jac_y.reshape(jac_y_diff.shape) + jac_y_diff
 
 def t_gpt2_tlayer_sublock2_bkwd2_x(dloss_dx, layer_params, y, train=True, p_gen_aux=None): # input: seq_len x emb_dim
+    y_in = y
     blck_dloss_dx = dloss_dx
+    
     y_diff = t_layernorm_fwd(layer_params[:2], y)
-    jac_layernorm_x = t_layernorm_bkwd_x(layer_params[:2], y)
     y_diff_ffn = t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd)
     y = y + t_dropout_fwd(y_diff_ffn, train, p_gen_aux)
     
     # propagate back
     jac_dropout = t_dropout_bkwd(y_diff_ffn, train, p_gen_aux)
     dloss_dx = _vjp_in_2d(dloss_dx, jac_dropout)
-    jac_tlayer_ffn_x = t_tlayer_ffn_bkwd_x(layer_params[2:], y_diff, t_gelu_fwd)
-    dloss_dx = _vjp_in_2d(dloss_dx, jac_tlayer_ffn_x)
+    dloss_dx = t_tlayer_ffn_bkwd2_x(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
+    jac_layernorm_x = t_layernorm_bkwd_x(layer_params[:2], y_in)
     dloss_dx = _vjp_in_2d(dloss_dx, jac_layernorm_x)
 
     # account for "y" in residual's "y + y_diff"
