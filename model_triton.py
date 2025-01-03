@@ -640,11 +640,10 @@ def t_gpt2_tlayer_sublock2_bkwd2_x(dloss_dx, layer_params, y, train=True, p_gen_
     # propagate back
     dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_ffn, train, p_gen_aux)
     dloss_dx = t_tlayer_ffn_bkwd2_x(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
-    jac_layernorm_x = t_layernorm_bkwd_x(layer_params[:2], y_in)
-    dloss_dx = _vjp_in_2d(dloss_dx, jac_layernorm_x)
+    dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y_in)
 
-    # account for "y" in residual's "y + y_diff"
-    jac_y = torch.eye(y.numel(), device=y.device).reshape(jac_layernorm_x.shape)    
+    # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
+    jac_y = torch.eye(y.numel(), device=y.device).reshape(blck_dloss_dx.shape +blck_dloss_dx.shape)    
     dloss_dx = _vjp_in_2d(blck_dloss_dx, jac_y) + dloss_dx
     
     return dloss_dx
