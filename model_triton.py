@@ -566,15 +566,18 @@ def t_gpt2_tlayer_sublock2_bkwd2_p(dloss_dx, layer_params, y, train=True, p_gen_
     y_diff_ffn = t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd)
     y = y + t_dropout_fwd(y_diff_ffn, train, p_gen_aux)
     
+    # propagate back
     jac_dropout = t_dropout_bkwd(y_diff_ffn, train, p_gen_aux)
+    dloss_dx = _vjp_in_2d(dloss_dx, jac_dropout)
+    
     jac_tlayer_ffn_p = t_tlayer_ffn_bkwd_p(layer_params[2:], y_diff, t_gelu_fwd)
     jac_tlayer_ffn_x = t_tlayer_ffn_bkwd_x(layer_params[2:], y_diff, t_gelu_fwd)
-      
-    jac_tlayer_ffn_p = _mult_jacs_in_2d(jac_dropout, jac_tlayer_ffn_p, y_diff_ffn)
-    jac_tlayer_ffn_x = _mult_jacs_in_2d(jac_dropout, [jac_tlayer_ffn_x], y_diff_ffn)[0]
+
+    tlayer_ffn_dloss_dx = _vjps_in_2d(dloss_dx, jac_tlayer_ffn_p)   
+    dloss_dx = _vjp_in_2d(dloss_dx, jac_tlayer_ffn_x)
     
-    jac_layernorm_p = [torch.einsum("abcdef, defg->abcg", jac_tlayer_ffn_x, j) for j in jac_layernorm_p]
-    return tuple(_vjps_in_2d(dloss_dx, jac_layernorm_p + jac_tlayer_ffn_p))
+    layernorm_dloss_dp = _vjps_in_2d(dloss_dx, jac_layernorm_p)
+    return tuple(layernorm_dloss_dp + tlayer_ffn_dloss_dx)
 
 def t_gpt2_tlayer_sublock2_bkwd_x(layer_params, y, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
