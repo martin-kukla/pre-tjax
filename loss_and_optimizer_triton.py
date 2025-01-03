@@ -171,6 +171,11 @@ def t_acc_grad_loss(acc_grads, params, y, y_mask, y_indices):
     grad_loss_fn = partial(t_loss_bkwd, train=True, p_gen_aux=p_gen_aux)
     return _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices)
 
+def t_acc_grad_loss2(acc_grads, params, y, y_mask, y_indices):
+    p_gen_aux = sample_p_gen_aux(params)
+    grad_loss_fn = partial(t_loss_bkwd2, train=True, p_gen_aux=p_gen_aux)
+    return _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices)
+
 
 def _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices):
     i_step_grads, grad_loss_rest = grad_loss_fn(params, y, y_mask, y_indices)
