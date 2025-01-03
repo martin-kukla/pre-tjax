@@ -318,6 +318,19 @@ def t_tlayer_attn_bkwd_p(layer_params, qkv, mask, train, p_gen_aux=None): # inpu
     res = _mult_jacs_in_2d(jac_proj_x, [jac_heads_attns_p], qkv[0])[0]
     return res, jac_proj_p
 
+def t_tlayer_attn_bkwd2_p(dloss_dx, layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
+    jac_heads_attns_p = t_tlayer_attn_heads_bkwd_p(layer_params[0], qkv, mask, train, p_gen_aux)
+    heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train, p_gen_aux)
+    BS, H, N, D = heads_attns.shape  
+    attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
+    jac_heads_attns_p = jac_heads_attns_p.transpose(1, 2).reshape((BS, N, -1) + layer_params[0].shape)  
+    
+    jac_proj_x = t_proj_bkwd_x(layer_params[-1], attn)
+    jac_proj_p = t_proj_bkwd_p(layer_params[-1], attn)
+    
+    res = _mult_jacs_in_2d(jac_proj_x, [jac_heads_attns_p], qkv[0])[0]
+    return _vjp_in_2d(dloss_dx, res), _vjp_in_2d(dloss_dx, jac_proj_p)
+
 def t_tlayer_attn_bkwd_x(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
     jac_heads_attns_x = t_tlayer_attn_heads_bkwd_x(layer_params[0], qkv, mask, train, p_gen_aux)
     heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train, p_gen_aux)
@@ -527,16 +540,16 @@ def t_gpt2_tlayer_sublock1_bkwd2_p(dloss_dx, layer_params, y, mask, train=True, 
     y_diff_attn = t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
     y = y + t_dropout_fwd(y_diff_attn, train, p_gen_aux[1])
 
-    jac_dropout = t_dropout_bkwd(y_diff_attn, train, p_gen_aux[1])
-    jac_tlayer_attn_p = t_tlayer_attn_bkwd_p(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    # propagate back
+    dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_attn, train, p_gen_aux[1])
+    tlayer_attn_dloss_dp = t_tlayer_attn_bkwd2_p(dloss_dx, layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])   
     jac_tlayer_attn_x = t_tlayer_attn_bkwd_x(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    jac_tlayer_attn_x = _vjps_in_2d(dloss_dx, jac_tlayer_attn_x)
     
-    jac_tlayer_attn_p = _mult_jacs_in_2d(jac_dropout, jac_tlayer_attn_p, y_diff_attn)
-    jac_tlayer_attn_x = _mult_jacs_in_2d(jac_dropout, jac_tlayer_attn_x, y_diff_attn)
-    
+    # TODO XXX: clean up stack + einsum combo, so we can use t_layernorm_bkwd2_p directly
     jac_tlayer_attn_x = torch.stack(jac_tlayer_attn_x)
-    jac_layernorm_p = [torch.einsum("xabcdef, defg->abcg", jac_tlayer_attn_x, j) for j in jac_layernorm_p]
-    return tuple(_vjps_in_2d(dloss_dx, jac_layernorm_p + jac_tlayer_attn_p))
+    jac_layernorm_p = [torch.einsum("xdef, defg->g", jac_tlayer_attn_x, j) for j in jac_layernorm_p]
+    return tuple(jac_layernorm_p) + tlayer_attn_dloss_dp
 
 def t_gpt2_tlayer_sublock1_bkwd_x(layer_params, y, mask, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     if not train:
