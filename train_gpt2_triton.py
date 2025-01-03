@@ -38,7 +38,7 @@ print(f'Vocabulary size: {model_vocab_size:_}')
 print(f'Number of params: {count_num_params(params):_}')
 
 # ### Loss + Grads + Optimizers
-from loss_and_optimizer_triton import loss_train, loss_eval, grad_loss, acc_grad_loss, t_acc_grad_loss, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms # TODO XXX: add remaining
+from loss_and_optimizer_triton import loss_train, loss_eval, grad_loss, acc_grad_loss, t_acc_grad_loss, t_acc_grad_loss2, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms # TODO XXX: add remaining
 # from loss_and_optimizer import loss_train, loss_eval, log_probs, grad_loss, predict, acc_grad_loss, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms
 
 # # Figure out non bias/gain params, as we only want to apply weight decay to those in AdamW
@@ -170,6 +170,7 @@ while True:
         # Training step
         # TODO: introduce update func, which does grad_loss and adam, and then call/jit that function instead of calling/jitting two separate ones
         # TODO XXX: int32 for y? we could use uint16 if it were available
+        #grads, (loss_val, acc, _) = t_acc_grad_loss2(grads, params, torch.tensor(y, dtype=torch.int32, device="cuda"), torch.tensor(y_mask, dtype=torch.bool, device="cuda"), torch.tensor(y_indices, dtype=torch.int, device="cuda"))
         #grads, (loss_val, acc, _) = t_acc_grad_loss(grads, params, torch.tensor(y, dtype=torch.int32, device="cuda"), torch.tensor(y_mask, dtype=torch.bool, device="cuda"), torch.tensor(y_indices, dtype=torch.int, device="cuda"))
         grads, (loss_val, acc, _) = acc_grad_loss(grads, params, torch.tensor(y, dtype=torch.int32, device="cuda"), torch.tensor(y_mask, dtype=torch.bool, device="cuda"), torch.tensor(y_indices, dtype=torch.int, device="cuda"))
         #grads, (loss_val, acc) = grad_loss(params, jnp.array(x), jnp.array(y), key_iter)
