@@ -351,6 +351,24 @@ def t_tlayer_ffn_bkwd_p(layer_params, x, activation_fn):
     
     return [j.reshape(x.shape+p.shape) for j, p in zip(jac1+jac2, layer_params)]
 
+def t_tlayer_ffn_bkwd2_p(dloss_dx, layer_params, x, activation_fn):
+    x_2d = x.reshape((-1, x.shape[-1]))
+    
+    act_fn_bkwd = t_gelu_bkwd if activation_fn==t_gelu_fwd else t_relu_bkwd
+    
+    jac1 = t_linear_bkwd_p((layer_params[0], layer_params[1]), x_2d)
+    x_2d = t_linear_fwd((layer_params[0], layer_params[1]), x_2d)
+    dact_dx = act_fn_bkwd(x_2d)
+    x_2d = activation_fn(x_2d)
+    jac2 = t_linear_bkwd_p((layer_params[2], layer_params[3]), x_2d)
+    dffn2_dx = t_linear_bkwd_x((layer_params[2], layer_params[3]), x_2d)
+    dffn2_act_dx = dact_dx * dffn2_dx #Note dact_dx is only 2D, but torch will add other dims
+    jac1 = (torch.einsum('abcd,cdef->abef', dffn2_act_dx, jac1[0]),
+            torch.einsum('abcd,cdf->abf', dffn2_act_dx, jac1[1]))
+    
+    jacs = [j.reshape(x.shape+p.shape) for j, p in zip(jac1+jac2, layer_params)]
+    return _vjps_in_2d(dloss_dx, jacs)
+
 def t_tlayer_ffn_bkwd_x(layer_params, x, activation_fn):
     x_2d = x.reshape((-1, x.shape[-1]))
     
@@ -364,6 +382,22 @@ def t_tlayer_ffn_bkwd_x(layer_params, x, activation_fn):
     dffn2_act_dx = dact_dx * dffn2_dx #Note dact_dx is only 2D, but torch will add other dims
     jac = torch.einsum('abcd,cdef->abef', dffn2_act_dx, dffn1_dx)
     return jac.reshape(x.shape+x.shape)
+
+def t_tlayer_ffn_bkwd2_x(dloss_dx, layer_params, x, activation_fn):
+    x_2d = x.reshape((-1, x.shape[-1]))
+    
+    act_fn_bkwd = t_gelu_bkwd if activation_fn==t_gelu_fwd else t_relu_bkwd
+    
+    dffn1_dx = t_linear_bkwd_x((layer_params[0], layer_params[1]), x_2d)
+    x_2d = t_linear_fwd((layer_params[0], layer_params[1]), x_2d)
+    dact_dx = act_fn_bkwd(x_2d)
+    x_2d = activation_fn(x_2d)
+    dffn2_dx = t_linear_bkwd_x((layer_params[2], layer_params[3]), x_2d)
+    dffn2_act_dx = dact_dx * dffn2_dx #Note dact_dx is only 2D, but torch will add other dims
+    jac = torch.einsum('abcd,cdef->abef', dffn2_act_dx, dffn1_dx)
+    jac = jac.reshape(x.shape+x.shape)
+    
+    return _vjp_in_2d(dloss_dx, jac)
 
 def t_dropout_fwd(x, train=True, p_gen_aux=None):
     if not train: # As we jit the whole loss/inference, the train param is known at tracing time.
@@ -569,15 +603,11 @@ def t_gpt2_tlayer_sublock2_bkwd2_p(dloss_dx, layer_params, y, train=True, p_gen_
     # propagate back
     jac_dropout = t_dropout_bkwd(y_diff_ffn, train, p_gen_aux)
     dloss_dx = _vjp_in_2d(dloss_dx, jac_dropout)
-    
-    jac_tlayer_ffn_p = t_tlayer_ffn_bkwd_p(layer_params[2:], y_diff, t_gelu_fwd)
-    jac_tlayer_ffn_x = t_tlayer_ffn_bkwd_x(layer_params[2:], y_diff, t_gelu_fwd)
-
-    tlayer_ffn_dloss_dx = _vjps_in_2d(dloss_dx, jac_tlayer_ffn_p)   
-    dloss_dx = _vjp_in_2d(dloss_dx, jac_tlayer_ffn_x)
+    tlayer_ffn_dloss_dp = t_tlayer_ffn_bkwd2_p(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
+    dloss_dx = t_tlayer_ffn_bkwd2_x(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y_in)
     
-    return layernorm_dloss_dp + tuple(tlayer_ffn_dloss_dx)
+    return layernorm_dloss_dp + tuple(tlayer_ffn_dloss_dp)
 
 def t_gpt2_tlayer_sublock2_bkwd_x(layer_params, y, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
