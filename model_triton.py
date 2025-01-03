@@ -561,8 +561,8 @@ def t_gpt2_tlayer_sublock2_bkwd_p(layer_params, y, train=True, p_gen_aux=None): 
     return tuple(jac_layernorm_p + jac_tlayer_ffn_p)
 
 def t_gpt2_tlayer_sublock2_bkwd2_p(dloss_dx, layer_params, y, train=True, p_gen_aux=None): # input: seq_len x emb_dim
+    y_in = y
     y_diff = t_layernorm_fwd(layer_params[:2], y)
-    jac_layernorm_p = t_layernorm_bkwd_p(layer_params[:2], y)
     y_diff_ffn = t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd)
     y = y + t_dropout_fwd(y_diff_ffn, train, p_gen_aux)
     
@@ -575,9 +575,9 @@ def t_gpt2_tlayer_sublock2_bkwd2_p(dloss_dx, layer_params, y, train=True, p_gen_
 
     tlayer_ffn_dloss_dx = _vjps_in_2d(dloss_dx, jac_tlayer_ffn_p)   
     dloss_dx = _vjp_in_2d(dloss_dx, jac_tlayer_ffn_x)
+    layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y_in)
     
-    layernorm_dloss_dp = _vjps_in_2d(dloss_dx, jac_layernorm_p)
-    return tuple(layernorm_dloss_dp + tlayer_ffn_dloss_dx)
+    return layernorm_dloss_dp + tuple(tlayer_ffn_dloss_dx)
 
 def t_gpt2_tlayer_sublock2_bkwd_x(layer_params, y, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
