@@ -419,6 +419,11 @@ def t_dropout_bkwd(x, train=True, p_gen_aux=None):
     mask = torch.bernoulli(torch.full_like(x, 1-DROPOUT_RATE), generator=generator) 
     return eyed_jac * mask
 
+def t_dropout_bkwd2(dloss_dx, x, train=True, p_gen_aux=None):
+    jac_dropout = t_dropout_bkwd(x, train, p_gen_aux)
+    
+    return _vjp_in_2d(dloss_dx, jac_dropout)
+
 def t_layernorm_fwd(layer_params, x):
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims=True) # TODO XXX: Compute variance, add epsilon and take a sqrt instead (in order to avoid division by zero)
@@ -601,8 +606,7 @@ def t_gpt2_tlayer_sublock2_bkwd2_p(dloss_dx, layer_params, y, train=True, p_gen_
     y = y + t_dropout_fwd(y_diff_ffn, train, p_gen_aux)
     
     # propagate back
-    jac_dropout = t_dropout_bkwd(y_diff_ffn, train, p_gen_aux)
-    dloss_dx = _vjp_in_2d(dloss_dx, jac_dropout)
+    dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_ffn, train, p_gen_aux)
     tlayer_ffn_dloss_dp = t_tlayer_ffn_bkwd2_p(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
     dloss_dx = t_tlayer_ffn_bkwd2_x(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y_in)
@@ -634,8 +638,7 @@ def t_gpt2_tlayer_sublock2_bkwd2_x(dloss_dx, layer_params, y, train=True, p_gen_
     y = y + t_dropout_fwd(y_diff_ffn, train, p_gen_aux)
     
     # propagate back
-    jac_dropout = t_dropout_bkwd(y_diff_ffn, train, p_gen_aux)
-    dloss_dx = _vjp_in_2d(dloss_dx, jac_dropout)
+    dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_ffn, train, p_gen_aux)
     dloss_dx = t_tlayer_ffn_bkwd2_x(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
     jac_layernorm_x = t_layernorm_bkwd_x(layer_params[:2], y_in)
     dloss_dx = _vjp_in_2d(dloss_dx, jac_layernorm_x)
@@ -776,6 +779,7 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     y_in = y
     indices = torch.arange(y.shape[1], device=y.device).unsqueeze(0).expand(*y.shape) # we ignore indices arg
     y = t_embed_fwd(params[0], y)
+    # TODO: move the below line, and start using t_dropout_bkwd2
     jac_dropout = t_dropout_bkwd(y + params[1][0], train, p_gen_aux[0])
     y = t_dropout_fwd(y + params[1][0], train, p_gen_aux[0])
     
