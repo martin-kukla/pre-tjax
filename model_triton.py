@@ -546,8 +546,8 @@ def t_gpt2_tlayer_sublock1_bkwd2_p(dloss_dx, layer_params, y, mask, train=True, 
     if not train:
         p_gen_aux = [None, None]
         
+    y_in = y
     y_diff = t_layernorm_fwd(layer_params[:2], y)
-    jac_layernorm_p = t_layernorm_bkwd_p(layer_params[:2], y)
     y_diff_attn = t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
     y = y + t_dropout_fwd(y_diff_attn, train, p_gen_aux[1])
 
@@ -555,12 +555,10 @@ def t_gpt2_tlayer_sublock1_bkwd2_p(dloss_dx, layer_params, y, mask, train=True, 
     dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_attn, train, p_gen_aux[1])
     tlayer_attn_dloss_dp = t_tlayer_attn_bkwd2_p(dloss_dx, layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])   
     dloss_dx = t_tlayer_attn_bkwd2_x(dloss_dx, layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    dloss_dx = torch.stack(dloss_dx).sum(dim=0) # TODO XXX: is there more efficient way of writing it?
+    layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y_in)
     
-    # TODO XXX: clean up stack + einsum combo, so we can use t_layernorm_bkwd2_p directly
-    # Can we just sum jac_tlayer_attn_x across new dim0?
-    dloss_dx = torch.stack(dloss_dx)
-    layernorm_dloss_dp = [torch.einsum("xdef, defg->g", dloss_dx, j) for j in jac_layernorm_p]
-    return tuple(layernorm_dloss_dp) + tlayer_attn_dloss_dp
+    return layernorm_dloss_dp + tlayer_attn_dloss_dp
 
 def t_gpt2_tlayer_sublock1_bkwd_x(layer_params, y, mask, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     if not train:
