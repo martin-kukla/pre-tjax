@@ -391,7 +391,7 @@ def t_tlayer_ffn_bkwd2_p(dloss_dx, layer_params, x, activation_fn):
             torch.einsum('abcd,cdf->abf', dffn2_act_dx, jac1[1]))
     
     jacs = [j.reshape(x.shape+p.shape) for j, p in zip(jac1+jac2, layer_params)]
-    return _vjps_in_2d(dloss_dx, jacs)
+    return tuple(_vjps_in_2d(dloss_dx, jacs))
 
 def t_tlayer_ffn_bkwd_x(layer_params, x, activation_fn):
     x_2d = x.reshape((-1, x.shape[-1]))
@@ -588,6 +588,7 @@ def t_gpt2_tlayer_sublock1_bkwd2_x(dloss_dx, layer_params, y, mask, train=True, 
     y_diff_attn = t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
     y = y + t_dropout_fwd(y_diff_attn, train, p_gen_aux[1])
 
+    # propagate back
     jac_dropout = t_dropout_bkwd(y_diff_attn, train, p_gen_aux[1])
     jac_tlayer_attn_x = t_tlayer_attn_bkwd_x(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
     
@@ -633,7 +634,7 @@ def t_gpt2_tlayer_sublock2_bkwd2_p(dloss_dx, layer_params, y, train=True, p_gen_
     dloss_dx = t_tlayer_ffn_bkwd2_x(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y_in)
     
-    return layernorm_dloss_dp + tuple(tlayer_ffn_dloss_dp)
+    return layernorm_dloss_dp + tlayer_ffn_dloss_dp
 
 def t_gpt2_tlayer_sublock2_bkwd_x(layer_params, y, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
@@ -663,7 +664,6 @@ def t_gpt2_tlayer_sublock2_bkwd2_x(dloss_dx, layer_params, y, train=True, p_gen_
     dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_ffn, train, p_gen_aux)
     dloss_dx = t_tlayer_ffn_bkwd2_x(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
     dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y_in)
-
     # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
     jac_y = torch.eye(y.numel(), device=y.device).reshape(blck_dloss_dx.shape +blck_dloss_dx.shape)    
     dloss_dx = _vjp_in_2d(blck_dloss_dx, jac_y) + dloss_dx
