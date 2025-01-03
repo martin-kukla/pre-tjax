@@ -582,24 +582,23 @@ def t_gpt2_tlayer_sublock1_bkwd_x(layer_params, y, mask, train=True, p_gen_aux=N
 def t_gpt2_tlayer_sublock1_bkwd2_x(dloss_dx, layer_params, y, mask, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     if not train:
         p_gen_aux = [None, None]
-    
+        
+    y_in=y
+    blck_dloss_dx = dloss_dx
     y_diff = t_layernorm_fwd(layer_params[:2], y)
-    jac_layernorm_x = t_layernorm_bkwd_x(layer_params[:2], y)
     y_diff_attn = t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
     y = y + t_dropout_fwd(y_diff_attn, train, p_gen_aux[1])
 
     # propagate back
-    jac_dropout = t_dropout_bkwd(y_diff_attn, train, p_gen_aux[1])
-    jac_tlayer_attn_x = t_tlayer_attn_bkwd_x(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_attn, train, p_gen_aux[1])
+    dloss_dx = t_tlayer_attn_bkwd2_x(dloss_dx, layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    dloss_dx = torch.stack(dloss_dx).sum(dim=0)
+    dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y_in)
+    # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
+    jac_y = torch.eye(y.numel(), device=y.device).reshape(blck_dloss_dx.shape + blck_dloss_dx.shape)
+    dloss_dx = _vjp_in_2d(blck_dloss_dx, jac_y) + dloss_dx
     
-    jac_tlayer_attn_x = _mult_jacs_in_2d(jac_dropout, jac_tlayer_attn_x, y_diff_attn)
-    
-    jac_y = torch.eye(y.numel(), device=y.device)    
-    jac_tlayer_attn_x = torch.stack(jac_tlayer_attn_x)
-    jac_y_diff = torch.einsum("xabcdef, defghi->abcghi", jac_tlayer_attn_x, jac_layernorm_x)
-    jac = jac_y.reshape(jac_y_diff.shape) + jac_y_diff
-    
-    return _vjp_in_2d(dloss_dx, jac)
+    return dloss_dx
     
 def t_gpt2_tlayer_sublock2_fwd(layer_params, y, train=True, p_gen_aux=None):
     y_diff = t_layernorm_fwd(layer_params[:-4], y)
