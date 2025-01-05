@@ -142,6 +142,7 @@ def t_linear_bkwd_x(layer_params, x): # input: N x D
     return t_proj_bkwd_x(layer_params[0], x)
 
 def t_linear_bkwd2_x(dloss_dx, layer_params, x): # input: N x D
+    # TODO XXX: call t_proj_bkwd2_x instead
     return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params[0], x))
 
 def t_proj_fwd(layer_params, x): # input: seq_len x emb_dim
@@ -187,6 +188,9 @@ def my_t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
     
     outdims = indims[:-1] + (outdim, )
     return (jac*aux).reshape(outdims + indims)
+
+def t_proj_bkwd2_x(dloss_dx, layer_params, x):
+    return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params, x))
 
 def t_softmax_attn_fwd(q, k, mask, train, p_gen_aux=None):
     D = q.shape[-1]
@@ -351,11 +355,10 @@ def t_tlayer_attn_bkwd2_x(dloss_dx, layer_params, qkv, mask, train, p_gen_aux=No
     attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
     
     # propagate back
-    jac_proj_x = t_proj_bkwd_x(layer_params[-1], attn)
+    dloss_dx = t_proj_bkwd2_x(dloss_dx, layer_params[-1], attn)
     jac_heads_attns_x = t_tlayer_attn_heads_bkwd_x(layer_params[0], qkv, mask, train, p_gen_aux)
     jac_heads_attns_x = [j.transpose(1, 2).reshape((BS, N, -1) + qkv[0].shape) for j in jac_heads_attns_x]
-    jacs = _mult_jacs_in_2d(jac_proj_x, jac_heads_attns_x, qkv[0])
-    return tuple(_vjps_in_2d(dloss_dx, jacs))
+    return tuple(_vjps_in_2d(dloss_dx, jac_heads_attns_x))
 
 def t_tlayer_ffn_fwd(layer_params, x, activation_fn): # input: seq_len x emb_dim
     x = t_linear_fwd((layer_params[0], layer_params[1]), x)
