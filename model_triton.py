@@ -337,10 +337,11 @@ def t_tlayer_attn_bkwd2_p(dloss_dx, layer_params, qkv, mask, train, p_gen_aux=No
     # propagate back
     proj_dloss_dp = t_proj_bkwd2_p(dloss_dx, layer_params[-1], attn)
     dloss_dx = t_proj_bkwd2_x(dloss_dx, layer_params[-1], attn)
+    dloss_dx = dloss_dx.reshape(BS, N, H, D).transpose(1, 2) # unflatten H+D, then swap back H and N
     jac_heads_attns_p = t_tlayer_attn_heads_bkwd_p(layer_params[0], qkv, mask, train, p_gen_aux)    
-    jac_heads_attns_p = jac_heads_attns_p.transpose(1, 2).reshape((BS, N, -1) + layer_params[0].shape)  
+    heads_attns_dloss_dp = _vjp_in_2d(dloss_dx, jac_heads_attns_p)
     
-    return _vjp_in_2d(dloss_dx, jac_heads_attns_p), proj_dloss_dp
+    return heads_attns_dloss_dp, proj_dloss_dp
 
 def t_tlayer_attn_bkwd_x(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
     jac_heads_attns_x = t_tlayer_attn_heads_bkwd_x(layer_params[0], qkv, mask, train, p_gen_aux)
