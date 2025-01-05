@@ -169,6 +169,9 @@ def my_t_proj_bkwd_p(layer_params, x): # input: seq_len x emb_dim
     outdims = indims[:-1] + (outdim, )
     return (jac*aux).reshape(outdims + layer_params.shape)
 
+def t_proj_bkwd2_p(dloss_dx, layer_params, x): # input: N x D
+    return _vjp_in_2d(dloss_dx, t_proj_bkwd_p(layer_params, x))
+
 # TODO XXX: Placebolder. Code up Jacobian for bmm
 def t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
     from torch.func import jacrev
@@ -327,17 +330,17 @@ def t_tlayer_attn_bkwd_p(layer_params, qkv, mask, train, p_gen_aux=None): # inpu
     return res, jac_proj_p
 
 def t_tlayer_attn_bkwd2_p(dloss_dx, layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
-    jac_heads_attns_p = t_tlayer_attn_heads_bkwd_p(layer_params[0], qkv, mask, train, p_gen_aux)
     heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train, p_gen_aux)
     BS, H, N, D = heads_attns.shape  
     attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
+
+    # propagate back
+    proj_dloss_dp = t_proj_bkwd2_p(dloss_dx, layer_params[-1], attn)
+    dloss_dx = t_proj_bkwd2_x(dloss_dx, layer_params[-1], attn)
+    jac_heads_attns_p = t_tlayer_attn_heads_bkwd_p(layer_params[0], qkv, mask, train, p_gen_aux)    
     jac_heads_attns_p = jac_heads_attns_p.transpose(1, 2).reshape((BS, N, -1) + layer_params[0].shape)  
     
-    jac_proj_x = t_proj_bkwd_x(layer_params[-1], attn)
-    jac_proj_p = t_proj_bkwd_p(layer_params[-1], attn)
-    
-    res = _mult_jacs_in_2d(jac_proj_x, [jac_heads_attns_p], qkv[0])[0]
-    return _vjp_in_2d(dloss_dx, res), _vjp_in_2d(dloss_dx, jac_proj_p)
+    return _vjp_in_2d(dloss_dx, jac_heads_attns_p), proj_dloss_dp
 
 def t_tlayer_attn_bkwd_x(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
     jac_heads_attns_x = t_tlayer_attn_heads_bkwd_x(layer_params[0], qkv, mask, train, p_gen_aux)
