@@ -108,6 +108,10 @@ def t_gelu_bkwd(x): # TODO XXX XXX: I think maths can be simplified here?
     
     return 0.5 * (1 + tanh_term) + 0.5 * x * tanh_dx
 
+def t_gelu_bkwd2(dloss_dx, x):
+    jac = t_gelu_bkwd(x)
+    return dloss_dx * jac # note, this is elementwise op
+
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
 
@@ -409,19 +413,21 @@ def t_tlayer_ffn_bkwd_x(layer_params, x, activation_fn):
 
 def t_tlayer_ffn_bkwd2_x(dloss_dx, layer_params, x, activation_fn):
     x_2d = x.reshape((-1, x.shape[-1]))
+    # note, t_relu_bkwd2 is not implemented yet
+    act_fn_bkwd2 = t_gelu_bkwd2 if activation_fn==t_gelu_fwd else t_relu_bkwd2 
     
-    act_fn_bkwd = t_gelu_bkwd if activation_fn==t_gelu_fwd else t_relu_bkwd
-    
-    dffn1_dx = t_linear_bkwd_x((layer_params[0], layer_params[1]), x_2d)
+    x_2d_in0 = x_2d
     x_2d = t_linear_fwd((layer_params[0], layer_params[1]), x_2d)
-    dact_dx = act_fn_bkwd(x_2d)
+    x_2d_in1 = x_2d
     x_2d = activation_fn(x_2d)
-    dffn2_dx = t_linear_bkwd_x((layer_params[2], layer_params[3]), x_2d)
-    dffn2_act_dx = dact_dx * dffn2_dx #Note dact_dx is only 2D, but torch will add other dims
-    jac = torch.einsum('abcd,cdef->abef', dffn2_act_dx, dffn1_dx)
-    jac = jac.reshape(x.shape+x.shape)
     
-    return _vjp_in_2d(dloss_dx, jac)
+    # propagate back
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    dloss_dx_2d = t_linear_bkwd2_x(dloss_dx_2d, (layer_params[2], layer_params[3]), x_2d)
+    dloss_dx_2d = act_fn_bkwd2(dloss_dx_2d, x_2d_in1)
+    dloss_dx_2d = t_linear_bkwd2_x(dloss_dx_2d, (layer_params[0], layer_params[1]), x_2d_in0)
+
+    return dloss_dx_2d.reshape(x.shape)
 
 def t_dropout_fwd(x, train=True, p_gen_aux=None):
     if not train: # As we jit the whole loss/inference, the train param is known at tracing time.
