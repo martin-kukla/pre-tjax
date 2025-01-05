@@ -300,14 +300,14 @@ def t_tlayer_attn_heads_bkwd_p(layer_params, qkv, mask, train, p_gen_aux=None): 
 
 def t_tlayer_attn_heads_bkwd2_p(dloss_dx, layer_params, qkv, mask, train, p_gen_aux=None): # params: H x 3 x D/H x D, input: BS x N x D
     qkv = torch.stack(qkv,dim=-3).unsqueeze(1)
-    
     proj_qkv = t_proj_fwd(layer_params, qkv)
-    jac_proj_p = t_proj_bkwd_p(layer_params, qkv)
      
+    # propagate back
     jac_sdpa_x = t_scaled_dot_prod_attn_bkwd(proj_qkv, mask, train, p_gen_aux)
     jac_sdpa_x = torch.stack(jac_sdpa_x, dim=-3)
-    jac_p = _mult_jacs_in_2d(jac_sdpa_x, [jac_proj_p], qkv)[0]
-    return _vjp_in_2d(dloss_dx, jac_p)
+    dloss_dx = _vjp_in_2d(dloss_dx, jac_sdpa_x)
+    dloss_dp = t_proj_bkwd2_p(dloss_dx, layer_params, qkv)
+    return dloss_dp
 
 def t_tlayer_attn_heads_bkwd_x(layer_params, qkv, mask, train, p_gen_aux=None): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
     qkv = torch.stack(qkv,dim=-3).unsqueeze(1)
@@ -323,12 +323,12 @@ def t_tlayer_attn_heads_bkwd_x(layer_params, qkv, mask, train, p_gen_aux=None): 
 
 def t_tlayer_attn_heads_bkwd2_x(dloss_dx, layer_params, qkv, mask, train, p_gen_aux=None): # params: H x 3 x D/H x D, input: BS x S x D
     qkv = torch.stack(qkv,dim=-3).unsqueeze(1)
-    
     proj_qkv = t_proj_fwd(layer_params, qkv)
-    jac_proj_x = t_proj_bkwd_x(layer_params, qkv)
-     
+    
+    # propagate back
     jac_sdpa_x = t_scaled_dot_prod_attn_bkwd(proj_qkv, mask, train, p_gen_aux)
     jac_sdpa_x = torch.stack(jac_sdpa_x, dim=-3)
+    jac_proj_x = t_proj_bkwd_x(layer_params, qkv)
     jac_x = _mult_jacs_in_2d(jac_sdpa_x, [jac_proj_x], qkv)[0]
     
     # TODO XXX: multiply before unbind 
