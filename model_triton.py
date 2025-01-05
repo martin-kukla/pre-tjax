@@ -345,14 +345,15 @@ def t_tlayer_attn_bkwd_x(layer_params, qkv, mask, train, p_gen_aux=None): # inpu
     jac_proj_x = t_proj_bkwd_x(layer_params[-1], attn)
     return tuple(_mult_jacs_in_2d(jac_proj_x, jac_heads_attns_x, qkv[0]))
 
-def t_tlayer_attn_bkwd2_x(dloss_dx, layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
-    jac_heads_attns_x = t_tlayer_attn_heads_bkwd_x(layer_params[0], qkv, mask, train, p_gen_aux)
+def t_tlayer_attn_bkwd2_x(dloss_dx, layer_params, qkv, mask, train, p_gen_aux=None): # input: BS x N x D
     heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train, p_gen_aux)
     BS, H, N, D = heads_attns.shape
     attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
-    jac_heads_attns_x = [j.transpose(1, 2).reshape((BS, N, -1) + qkv[0].shape) for j in jac_heads_attns_x]
     
+    # propagate back
     jac_proj_x = t_proj_bkwd_x(layer_params[-1], attn)
+    jac_heads_attns_x = t_tlayer_attn_heads_bkwd_x(layer_params[0], qkv, mask, train, p_gen_aux)
+    jac_heads_attns_x = [j.transpose(1, 2).reshape((BS, N, -1) + qkv[0].shape) for j in jac_heads_attns_x]
     jacs = _mult_jacs_in_2d(jac_proj_x, jac_heads_attns_x, qkv[0])
     return tuple(_vjps_in_2d(dloss_dx, jacs))
 
