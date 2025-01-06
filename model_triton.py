@@ -342,14 +342,11 @@ def t_tlayer_attn_heads_bkwd2_x(dloss_dx, layer_params, qkv, mask, train, p_gen_
     proj_qkv = t_proj_fwd(layer_params, qkv)
     
     # propagate back
-    jac_sdpa_x = t_scaled_dot_prod_attn_bkwd(proj_qkv, mask, train, p_gen_aux)
-    jac_sdpa_x = torch.stack(jac_sdpa_x, dim=-3)
-    jac_proj_x = t_proj_bkwd_x(layer_params, qkv)
-    jac_x = _mult_jacs_in_2d(jac_sdpa_x, [jac_proj_x], qkv)[0]
-    
-    # TODO XXX: multiply before unbind 
-    jacs = jac_x.squeeze(-4).unbind(-3)
-    return _vjps_in_2d(dloss_dx, jacs) 
+    dloss_dx = t_scaled_dot_prod_attn_bkwd2(dloss_dx, proj_qkv, mask, train, p_gen_aux)
+    dloss_dx = torch.stack(dloss_dx, dim=-3)
+    dloss_dx = t_proj_bkwd2_x(dloss_dx, layer_params, qkv)
+    dloss_dqkv = dloss_dx.squeeze(-4).unbind(-3)
+    return dloss_dqkv
 
 def t_tlayer_attn_fwd(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
     heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train, p_gen_aux)
