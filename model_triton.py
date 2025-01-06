@@ -235,20 +235,40 @@ def t_softmax_attn_bkwd2(dloss_dx, q, k, mask, train, p_gen_aux=None):
     sa = torch.exp(t_log_softmax_fwd(attn)) 
 
     # propagate back
+    dloss_dx_in = dloss_dx
     jac_dropout = t_dropout_bkwd(sa, train, p_gen_aux)
+    dloss_dx = _vjp_in_2d(dloss_dx, jac_dropout)
     #TODO: Note, we are overloading _mult.., as right is not Jacobian...
+    jac_exp = sa
     sa = _mult_jacs_in_2d(jac_dropout, [sa], sa)[0] 
+    dloss_dx = dloss_dx * jac_exp #exp is element-wise op. TODO: check if this is correct?
     
     # TODO XXX: Clean up below..
-    jac_sa_x = sa[..., None, None, None, None] * t_log_softmax_bkwd(attn)
+    jac_log_softmax = t_log_softmax_bkwd(attn)
+    jac_sa_x = sa[..., None, None, None, None] * jac_log_softmax 
+    dloss_dx = _vjp_in_2d(dloss_dx, jac_log_softmax)
+    dloss_dx = torch.where(torch.unsqueeze(mask,dim=1), dloss_dx, 0) # Mask here for dloss_dx?   
     jac1 = torch.matmul(jac_sa_x, k/math.sqrt(D))
+    n_dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
+    print(f'q.shape', q.shape, 'jac_sa_x.shape', jac_sa_x.shape, 'jac_log_softmax.shape', jac_log_softmax.shape)
     jac2 = torch.matmul(q.transpose(-2,-1), jac_sa_x/math.sqrt(D)).transpose(-2,-1)
+    # TODO XXX: The below line is wrong: matrix multipcalition (or vjp) is not commutative, that's why
+    # it will not give the same result as previous implementation (as q.trans.. is on left size)
+    n_dloss_dk = torch.matmul(q.transpose(-2,-1), dloss_dx/math.sqrt(D)).transpose(-2,-1)
     # Account for mask:
     jac_mask = torch.unsqueeze(mask,dim=1)[..., None, None, None, None]
     jac1 = torch.where(jac_mask, jac1, 0)
     jac2 = torch.where(jac_mask, jac2, 0)
-    dloss_dq, dloss_dk = _vjps_in_2d(dloss_dx, [jac1, jac2])
-    return dloss_dq, dloss_dk
+    dloss_dq, dloss_dk = _vjps_in_2d(dloss_dx_in, [jac1, jac2])
+#     print('dloss_dq', dloss_dq)    
+#     print('dloss_dk', dloss_dk)
+#     print(f'XXX')
+#     print('n_dloss_dq', n_dloss_dq)    
+#     print('n_dloss_dk', n_dloss_dk)       
+#     print('-----')
+    
+    return n_dloss_dq, dloss_dk # TODO XXX: replace n_dloss_dk with dloss_dk
+    #return dloss_dq, dloss_dk
 
 def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
