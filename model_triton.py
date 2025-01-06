@@ -217,8 +217,7 @@ def t_softmax_attn_bkwd(q, k, mask, train, p_gen_aux=None):
     sa = _mult_jacs_in_2d(jac_dropout, [sa], sa)[0] 
     
     # TODO XXX: Clean up below..
-    d_dropout_dx = 1 #0.9 # TODO: XXX add proper dropout 
-    jac_sa_x = d_dropout_dx * sa[..., None, None, None, None] * t_log_softmax_bkwd(attn)
+    jac_sa_x = sa[..., None, None, None, None] * t_log_softmax_bkwd(attn)
     jac1 = torch.matmul(jac_sa_x, k/math.sqrt(D))
     jac2 = torch.matmul(q.transpose(-2,-1), jac_sa_x/math.sqrt(D)).transpose(-2,-1)
     # Account for mask:
@@ -235,13 +234,13 @@ def t_softmax_attn_bkwd2(dloss_dx, q, k, mask, train, p_gen_aux=None):
     # TODO XXX: would the below line cause numerical stabliity issues?
     sa = torch.exp(t_log_softmax_fwd(attn)) 
 
+    # propagate back
     jac_dropout = t_dropout_bkwd(sa, train, p_gen_aux)
     #TODO: Note, we are overloading _mult.., as right is not Jacobian...
     sa = _mult_jacs_in_2d(jac_dropout, [sa], sa)[0] 
     
     # TODO XXX: Clean up below..
-    d_dropout_dx = 1 #0.9 # TODO: XXX add proper dropout 
-    jac_sa_x = d_dropout_dx * sa[..., None, None, None, None] * t_log_softmax_bkwd(attn)
+    jac_sa_x = sa[..., None, None, None, None] * t_log_softmax_bkwd(attn)
     jac1 = torch.matmul(jac_sa_x, k/math.sqrt(D))
     jac2 = torch.matmul(q.transpose(-2,-1), jac_sa_x/math.sqrt(D)).transpose(-2,-1)
     # Account for mask:
