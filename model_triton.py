@@ -248,6 +248,23 @@ def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True, p_gen_aux=None): # inputs
     
     return jacs_q_k[0], jacs_q_k[1], jac_v
 
+def t_scaled_dot_prod_attn_bkwd2(dloss_dx, qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
+    BS, H, _, N, D = qkv.shape
+    q, k, v = torch.unbind(qkv, dim=2)
+    
+    sa = t_softmax_attn_fwd(q, k, mask, train, p_gen_aux)
+    jac_sa_q, jac_sa_k = t_softmax_attn_bkwd(q, k, mask, train, p_gen_aux)     
+    
+    # TODO XXX: code up jacobian for bmm
+    from torch.func import jacrev
+    bbm_fn = lambda m1, m2: torch.matmul(m1, m2)
+    jac_bmm_sa, jac_v = jacrev(bbm_fn, argnums=(0,1))(sa, v)
+    
+    jacs_q_k = _mult_jacs_in_2d(jac_bmm_sa, [jac_sa_q, jac_sa_k], sa)   
+    
+    jacs = [jacs_q_k[0], jacs_q_k[1], jac_v]
+    return tuple(_vjps_in_2d(dloss_dx, jacs))
+
 # TODO XXX: Remove below
 # TODO XXX: Support for heads>1
 # TODO XXX: replace mult with the generic newer _mult
@@ -303,8 +320,7 @@ def t_tlayer_attn_heads_bkwd2_p(dloss_dx, layer_params, qkv, mask, train, p_gen_
     proj_qkv = t_proj_fwd(layer_params, qkv)
      
     # propagate back
-    jac_sdpa_x = t_scaled_dot_prod_attn_bkwd(proj_qkv, mask, train, p_gen_aux)
-    dloss_dx = _vjps_in_2d(dloss_dx, jac_sdpa_x)
+    dloss_dx = t_scaled_dot_prod_attn_bkwd2(dloss_dx, proj_qkv, mask, train, p_gen_aux)
     dloss_dx = torch.stack(dloss_dx, dim=-3)
     dloss_dp = t_proj_bkwd2_p(dloss_dx, layer_params, qkv)
     return dloss_dp
