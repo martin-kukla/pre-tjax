@@ -304,8 +304,8 @@ def t_tlayer_attn_heads_bkwd2_p(dloss_dx, layer_params, qkv, mask, train, p_gen_
      
     # propagate back
     jac_sdpa_x = t_scaled_dot_prod_attn_bkwd(proj_qkv, mask, train, p_gen_aux)
-    jac_sdpa_x = torch.stack(jac_sdpa_x, dim=-3)
-    dloss_dx = _vjp_in_2d(dloss_dx, jac_sdpa_x)
+    dloss_dx = _vjps_in_2d(dloss_dx, jac_sdpa_x)
+    dloss_dx = torch.stack(dloss_dx, dim=-3)
     dloss_dp = t_proj_bkwd2_p(dloss_dx, layer_params, qkv)
     return dloss_dp
 
