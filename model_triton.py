@@ -227,6 +227,30 @@ def t_softmax_attn_bkwd(q, k, mask, train, p_gen_aux=None):
     jac2 = torch.where(jac_mask, jac2, 0)
     return jac1, jac2
 
+def t_softmax_attn_bkwd2(dloss_dx, q, k, mask, train, p_gen_aux=None):
+    D = q.shape[-1]
+    attn = torch.matmul(q, torch.transpose(k, -2, -1))
+    attn = attn / math.sqrt(D)
+    attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
+    # TODO XXX: would the below line cause numerical stabliity issues?
+    sa = torch.exp(t_log_softmax_fwd(attn)) 
+
+    jac_dropout = t_dropout_bkwd(sa, train, p_gen_aux)
+    #TODO: Note, we are overloading _mult.., as right is not Jacobian...
+    sa = _mult_jacs_in_2d(jac_dropout, [sa], sa)[0] 
+    
+    # TODO XXX: Clean up below..
+    d_dropout_dx = 1 #0.9 # TODO: XXX add proper dropout 
+    jac_sa_x = d_dropout_dx * sa[..., None, None, None, None] * t_log_softmax_bkwd(attn)
+    jac1 = torch.matmul(jac_sa_x, k/math.sqrt(D))
+    jac2 = torch.matmul(q.transpose(-2,-1), jac_sa_x/math.sqrt(D)).transpose(-2,-1)
+    # Account for mask:
+    jac_mask = torch.unsqueeze(mask,dim=1)[..., None, None, None, None]
+    jac1 = torch.where(jac_mask, jac1, 0)
+    jac2 = torch.where(jac_mask, jac2, 0)
+    dloss_dq, dloss_dk = _vjps_in_2d(dloss_dx, [jac1, jac2])
+    return dloss_dq, dloss_dk
+
 def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
     softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train, p_gen_aux)
@@ -258,11 +282,11 @@ def t_scaled_dot_prod_attn_bkwd2(dloss_dx, qkv, mask, train=True, p_gen_aux=None
     from torch.func import jacrev
     bbm_fn = lambda m1, m2: torch.matmul(m1, m2)
     jac_bmm_sa, jac_v = jacrev(bbm_fn, argnums=(0,1))(sa, v)
+    dloss_dv = _vjp_in_2d(dloss_dx, jac_v)
     dloss_dsa = _vjp_in_2d(dloss_dx, jac_bmm_sa)
-    jac_sa_q, jac_sa_k = t_softmax_attn_bkwd(q, k, mask, train, p_gen_aux)     
-    dloss_dq, dloss_dk = _vjps_in_2d(dloss_dsa, [jac_sa_q, jac_sa_k])   
+    dloss_dq, dloss_dk = t_softmax_attn_bkwd2(dloss_dsa, q, k, mask, train, p_gen_aux)
     
-    return dloss_dq, dloss_dk, _vjp_in_2d(dloss_dx, jac_v)
+    return dloss_dq, dloss_dk, dloss_dv
 
 # TODO XXX: Remove below
 # TODO XXX: Support for heads>1
