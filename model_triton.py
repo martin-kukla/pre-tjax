@@ -54,7 +54,7 @@ def t_log_softmax_bkwd2(dloss_dx, x_logits):
     jac = (exp_logsums * jac_eye + jac) / exp_logsums
     jac_softmax = torch.block_diag(*jac.unbind(0)).reshape(indims+indims)
     
-    dloss_dx = torch.einsum("c, abcd -> abd", dloss_dx, jac_softmax)
+    dloss_dx = _vjp_in_2d(dloss_dx, jac_softmax)
     return dloss_dx
 
 def t_embed_fwd(layer_params, x): # input: 1 x

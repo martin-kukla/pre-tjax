@@ -48,10 +48,12 @@ def t_avg_cross_entropy_loss_bkwd2(y_labels, x_logits):
     elements_loss = t_log_softmax_fwd(x_logits_2d)[(torch.arange(y_labels.numel()), y_labels_1d)]
     elements_loss = torch.where(y_labels_1d != 0, elements_loss, float('nan'))
     
-    # TODO XXX: code up derivative for torch.nanmean
-    dloss_dx = -torch.func.jacrev(torch.nanmean)(elements_loss) 
-    
-    dloss_dx = t_log_softmax_bkwd2(dloss_dx, x_logits_2d)[(torch.arange(y_labels.numel()), y_labels_1d)]
+    # propagate back
+    # TODO XXX: code up derivative for torch.nanmean 
+    jac_nanmean = -torch.func.jacrev(torch.nanmean)(elements_loss) 
+    dloss_dx = torch.zeros_like(x_logits_2d) # bkwd for indexing
+    dloss_dx.scatter_(1, y_labels_1d.unsqueeze(1), jac_nanmean.unsqueeze(1))
+    dloss_dx = t_log_softmax_bkwd2(dloss_dx, x_logits_2d)
     
     return dloss_dx.reshape(x_logits.shape)
 
