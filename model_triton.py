@@ -745,6 +745,27 @@ def t_gpt2_tlayer_sublock2_bkwd2_x(dloss_dx, layer_params, y, train=True, p_gen_
     
     return dloss_dx
 
+def t_gpt2_tlayer_sublock2_bkwd2(dloss_dx, layer_params, y, train=True, p_gen_aux=None): # input: seq_len x emb_dim
+    y_in = y
+    blck_dloss_dx = dloss_dx
+    
+    y_diff = t_layernorm_fwd(layer_params[:2], y)
+    y_diff_ffn = t_tlayer_ffn_fwd(layer_params[2:], y_diff, t_gelu_fwd)
+    y = y + t_dropout_fwd(y_diff_ffn, train, p_gen_aux)
+    
+    # propagate back
+    dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_ffn, train, p_gen_aux)
+    tlayer_ffn_dloss_dp = t_tlayer_ffn_bkwd2_p(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
+    dloss_dx = t_tlayer_ffn_bkwd2_x(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
+    layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y_in)
+    dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y_in)
+    # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
+    jac_y = torch.eye(y.numel(), device=y.device).reshape(blck_dloss_dx.shape +blck_dloss_dx.shape)    
+    dloss_dx = _vjp_in_2d(blck_dloss_dx, jac_y) + dloss_dx
+    dloss_dp = layernorm_dloss_dp + tlayer_ffn_dloss_dp
+    
+    return dloss_dx, dloss_dp
+
 def t_gpt2_tlayer_fwd(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
     if not train:
         p_gen_aux = [None, None, None] 
@@ -796,6 +817,20 @@ def t_gpt2_tlayer_bkwd2_x(dloss_dx, layer_params, y, mask, train=True, p_gen_aux
     dloss_dx = t_gpt2_tlayer_sublock2_bkwd2_x(dloss_dx, layer_params[-6:], y, train, p_gen_aux[2])
     
     return t_gpt2_tlayer_sublock1_bkwd2_x(dloss_dx, layer_params[:-6], y_in, mask, train, p_gen_aux[:2])  
+
+def t_gpt2_tlayer_bkwd2(dloss_dx, layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
+    if not train:
+        p_gen_aux = [None, None, None]    
+    
+    y_in = y
+    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    subblock2_dloss_dp = t_gpt2_tlayer_sublock2_bkwd2_p(dloss_dx, layer_params[-6:], y, train, p_gen_aux[2])
+    dloss_dx = t_gpt2_tlayer_sublock2_bkwd2_x(dloss_dx, layer_params[-6:], y, train, p_gen_aux[2])
+    subblock1_dloss_dp = t_gpt2_tlayer_sublock1_bkwd2_p(dloss_dx, layer_params[:-6], y_in, mask, train, p_gen_aux[:2])
+    dloss_dx = t_gpt2_tlayer_sublock1_bkwd2_x(dloss_dx, layer_params[:-6], y_in, mask, train, p_gen_aux[:2])
+    dloss_dp = subblock1_dloss_dp + subblock2_dloss_dp
+    
+    return dloss_dx, dloss_dp
 
 def t_gpt2_tlayers_fwd(params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
     if not train: # as there are 3 dropouts per tlayer
