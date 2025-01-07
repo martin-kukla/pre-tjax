@@ -235,8 +235,7 @@ def t_softmax_attn_bkwd2(dloss_dx, q, k, mask, train, p_gen_aux=None):
     sa = torch.exp(t_log_softmax_fwd(attn)) 
 
     # propagate back
-    jac_dropout = t_dropout_bkwd(sa, train, p_gen_aux)
-    dloss_dx = _vjp_in_2d(dloss_dx, jac_dropout)
+    dloss_dx = t_dropout_bkwd2(dloss_dx, sa, train, p_gen_aux)
     dloss_dx = dloss_dx * sa #note, sa acts as jac_exp (exp is element-wise op). TODO: check if this is correct?
     
     # TODO XXX: code up jacobian for this bmm
@@ -250,7 +249,7 @@ def t_softmax_attn_bkwd2(dloss_dx, q, k, mask, train, p_gen_aux=None):
     dloss_dx = _vjp_in_2d(dloss_dx, jac_log_softmax)
     dloss_dx = torch.where(torch.unsqueeze(mask,dim=1), dloss_dx, 0)
     dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
-    dloss_dk = _vjp_in_2d(dloss_dx, bmm_jac_k)  
+    dloss_dk = _vjp_in_2d(dloss_dx, bmm_jac_k)
     
     return dloss_dq, dloss_dk
 
