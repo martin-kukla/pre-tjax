@@ -245,8 +245,7 @@ def t_softmax_attn_bkwd2(dloss_dx, q, k, mask, train, p_gen_aux=None):
     #print(f'q/math.sqrt(D)', q/math.sqrt(D), '\nbmm_jac_k', bmm_jac_k) # the same values..
     # And: bmm_jac_q would have the same values as k/math.sqrt(D) (that fact is used below) 
     
-    jac_log_softmax = t_log_softmax_bkwd(attn)
-    dloss_dx = _vjp_in_2d(dloss_dx, jac_log_softmax)
+    dloss_dx = t_log_softmax_bkwd2(dloss_dx, attn)
     dloss_dx = torch.where(torch.unsqueeze(mask,dim=1), dloss_dx, 0)
     dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
     dloss_dk = _vjp_in_2d(dloss_dx, bmm_jac_k)
