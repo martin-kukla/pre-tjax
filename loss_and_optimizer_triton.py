@@ -13,7 +13,7 @@ import math
 import torch
 from torch.func import grad
 from model_torch_func import log_softmax, batched_forward_gpt2
-from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_batched_forward_gpt2, t_gpt2_forward, t_gpt2_bkwd_p, _mult_jacs_in_2d
+from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_log_softmax_bkwd2, t_batched_forward_gpt2, t_gpt2_forward, t_gpt2_bkwd_p, t_gpt2_bkwd2_p, _mult_jacs_in_2d
 
 def avg_cross_entropy_loss(y_labels, x_logits):
     return _avg_cross_entropy_loss(log_softmax, y_labels, x_logits)
@@ -41,6 +41,21 @@ def t_avg_cross_entropy_loss_bkwd(y_labels, x_logits):
     jac_x_logits = torch.einsum("a, abc -> bc", jac_nanmean, jac_softmax)
     
     return jac_x_logits.reshape(x_logits.shape)
+
+def t_avg_cross_entropy_loss_bkwd2(y_labels, x_logits):
+    y_labels_1d = y_labels.reshape((-1,))
+    x_logits_2d = x_logits.reshape((y_labels.numel(), -1))
+    elements_loss = t_log_softmax_fwd(x_logits_2d)[(torch.arange(y_labels.numel()), y_labels_1d)]
+    elements_loss = torch.where(y_labels_1d != 0, elements_loss, float('nan'))
+    
+    # propagate back
+    # TODO XXX: code up derivative for torch.nanmean 
+    jac_nanmean = -torch.func.jacrev(torch.nanmean)(elements_loss) 
+    dloss_dx = torch.zeros_like(x_logits_2d) # bkwd for indexing
+    dloss_dx.scatter_(1, y_labels_1d.unsqueeze(1), jac_nanmean.unsqueeze(1))
+    dloss_dx = t_log_softmax_bkwd2(dloss_dx, x_logits_2d)
+    
+    return dloss_dx.reshape(x_logits.shape)
 
 def accuracy(y_labels, x_logits):
     return torch.nanmean(torch.where(y_labels!=0, y_labels == torch.argmax(x_logits, axis=-1), float('nan')))
@@ -99,6 +114,20 @@ def t_loss_bkwd(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs:
         dloss_dp[i] = _mult_jacs_in_2d(jac_celoss, dloss_dp[i], logits)
     return dloss_dp, (loss_val, acc, tokens_count/y_out.numel())
 
+def t_loss_bkwd2(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N    
+    y_in = y[:, :-1]
+    y_out = y[:, 1:]
+     
+    logits = t_gpt2_forward(params, y_in, y_mask, y_indices, train, p_gen_aux) 
+    
+    dloss_dx = t_avg_cross_entropy_loss_bkwd2(y_out, logits)
+    dloss_dx = t_gpt2_bkwd2_p(dloss_dx, params, y_in, y_mask, y_indices, train, p_gen_aux)
+    
+    loss_val, tokens_count = t_avg_cross_entropy_loss(y_out, logits)
+    acc = accuracy(y_out, logits)
+    
+    return dloss_dx, (loss_val, acc, tokens_count/y_out.numel())
+
 # print(f'iter #{i} loss {loss_train(params, jnp.array(x[:1]), jnp.array(y[:1]), random.PRNGKey(0))[0] }')
 
 # with jax.disable_jit():
@@ -142,6 +171,11 @@ def sample_p_gen_aux(params):
 def t_acc_grad_loss(acc_grads, params, y, y_mask, y_indices):
     p_gen_aux = sample_p_gen_aux(params)
     grad_loss_fn = partial(t_loss_bkwd, train=True, p_gen_aux=p_gen_aux)
+    return _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices)
+
+def t_acc_grad_loss2(acc_grads, params, y, y_mask, y_indices):
+    p_gen_aux = sample_p_gen_aux(params)
+    grad_loss_fn = partial(t_loss_bkwd2, train=True, p_gen_aux=p_gen_aux)
     return _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices)
 
 
