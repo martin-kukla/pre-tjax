@@ -995,8 +995,13 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     layers_dloss_dp = []
     for i, layer_params in reversed(list(enumerate(params[2:-1]))):
         y, layer_p_gen_aux = layers_inputs[i]
-        layers_dloss_dp.append(t_gpt2_tlayer_bkwd2_p(dloss_dx, layer_params, y, mask, train, layer_p_gen_aux))
-        dloss_dx = t_gpt2_tlayer_bkwd2_x(dloss_dx, layer_params, y, mask, train, layer_p_gen_aux)
+        # Use bkwd2 which combines dloss_dx and dloss_dp computations (for efficiency reasons)
+        # TODO XXX: do sanity check whether the results are exactly the same as for separate
+        # bkwd2_p and bkwd2_x
+        dloss_dx, layer_dloss_dp = t_gpt2_tlayer_bkwd2(dloss_dx, layer_params, y, mask, train, layer_p_gen_aux)
+        layers_dloss_dp.append(layer_dloss_dp)
+        #layers_dloss_dp.append(t_gpt2_tlayer_bkwd2_p(dloss_dx, layer_params, y, mask, train, layer_p_gen_aux))
+        #dloss_dx = t_gpt2_tlayer_bkwd2_x(dloss_dx, layer_params, y, mask, train, layer_p_gen_aux)
     layers_dloss_dp = list(reversed(layers_dloss_dp)) # TODO XXX: clean up list+ reversed combos
     
     # dropout + embed + pos_enc
