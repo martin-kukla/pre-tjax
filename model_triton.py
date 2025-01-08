@@ -151,8 +151,7 @@ def t_linear_bkwd_x(layer_params, x): # input: N x D
     return t_proj_bkwd_x(layer_params[0], x)
 
 def t_linear_bkwd2_x(dloss_dx, layer_params, x): # input: N x D
-    # TODO XXX: call t_proj_bkwd2_x instead
-    return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params[0], x))
+    return t_proj_bkwd2_x(dloss_dx, layer_params[0], x)
 
 def t_proj_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params, -2, -1)) # since layer_params is ... x output_dim x emb_dim
