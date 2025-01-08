@@ -52,6 +52,7 @@ def t_avg_cross_entropy_loss_bkwd2(y_labels, x_logits):
     # TODO XXX: code up derivative for torch.nanmean 
     jac_nanmean = -torch.func.jacrev(torch.nanmean)(elements_loss) 
     dloss_dx = torch.zeros_like(x_logits_2d) # bkwd for indexing
+    y_labels_1d = y_labels_1d.to(torch.int64) # HOTFIX. TODO XXX: Think whether we shouldn't pass ys in int64 instead?
     dloss_dx.scatter_(1, y_labels_1d.unsqueeze(1), jac_nanmean.unsqueeze(1))
     dloss_dx = t_log_softmax_bkwd2(dloss_dx, x_logits_2d)
     
