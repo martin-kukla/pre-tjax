@@ -52,9 +52,18 @@ def t_log_softmax_bkwd2(dloss_dx, x_logits):
     jac = jac.reshape(BS, N, N)
     jac_eye = torch.eye(N, device=x_logits.device).unsqueeze(0).expand(BS, N, N)
     jac = (exp_logsums * jac_eye + jac) / exp_logsums
-    jac_softmax = torch.block_diag(*jac.unbind(0)).reshape(indims+indims)
+
+    # Since it's only rowise dependency of outputs on inputs, we don't create full jacobian.
+    # Instead, we compute VJP in rowise fashion:
+    # jac_softmax = torch.block_diag(*jac.unbind(0)).reshape(indims+indims)
+    # dloss_dx = _vjp_in_2d(dloss_dx, jac_softmax)
+    def _vjp_in_2d_rowise(dloss_dx, rowise_jac): # dloss_dx: ... x IN_DIM, rowise_jac: BS x IN_DIM x OUT_DIM
+        outdim = dloss_dx.shape[:-1] + rowise_jac.shape[-1:]
+        dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+        dloss_dx = torch.matmul(dloss_dx_2d.unsqueeze(1), rowise_jac).squeeze(1)
+        return dloss_dx.reshape(outdim)
+    dloss_dx = _vjp_in_2d_rowise(dloss_dx, jac)
     
-    dloss_dx = _vjp_in_2d(dloss_dx, jac_softmax)
     return dloss_dx
 
 def t_embed_fwd(layer_params, x): # input: 1 x
