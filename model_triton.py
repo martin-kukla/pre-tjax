@@ -371,6 +371,19 @@ def t_tlayer_attn_heads_bkwd2_x(dloss_dx, layer_params, qkv, mask, train, p_gen_
     dloss_dqkv = dloss_dx.squeeze(-4).unbind(-3)
     return dloss_dqkv
 
+def t_tlayer_attn_heads_bkwd2(dloss_dx, layer_params, qkv, mask, train, p_gen_aux=None): # params: H x 3 x D/H x D, input: BS x S x D
+    qkv = torch.stack(qkv,dim=-3).unsqueeze(1)
+    proj_qkv = t_proj_fwd(layer_params, qkv)
+    
+    # propagate back
+    dloss_dx = t_scaled_dot_prod_attn_bkwd2(dloss_dx, proj_qkv, mask, train, p_gen_aux)
+    dloss_dx = torch.stack(dloss_dx, dim=-3)
+    dloss_dp = t_proj_bkwd2_p(dloss_dx, layer_params, qkv)
+    dloss_dx = t_proj_bkwd2_x(dloss_dx, layer_params, qkv)
+    dloss_dqkv = dloss_dx.squeeze(-4).unbind(-3)
+    
+    return dloss_dqkv, dloss_dp
+
 def t_tlayer_attn_fwd(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
     heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train, p_gen_aux)
     BS, H, N, D = heads_attns.shape
@@ -434,8 +447,7 @@ def t_tlayer_attn_bkwd2(dloss_dx, layer_params, qkv, mask, train, p_gen_aux=None
     proj_dloss_dp = t_proj_bkwd2_p(dloss_dx, layer_params[-1], attn)
     dloss_dx = t_proj_bkwd2_x(dloss_dx, layer_params[-1], attn)
     dloss_dx = dloss_dx.reshape(BS, N, H, D).transpose(1, 2) # unflatten H+D, then swap back H and N
-    heads_attns_dloss_dp = t_tlayer_attn_heads_bkwd2_p(dloss_dx, layer_params[0], qkv, mask, train, p_gen_aux)    
-    dloss_dx = t_tlayer_attn_heads_bkwd2_x(dloss_dx, layer_params[0], qkv, mask, train, p_gen_aux)
+    dloss_dx, heads_attns_dloss_dp = t_tlayer_attn_heads_bkwd2(dloss_dx, layer_params[0], qkv, mask, train, p_gen_aux)
     
     return dloss_dx, (heads_attns_dloss_dp, proj_dloss_dp)
 
