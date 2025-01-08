@@ -142,10 +142,10 @@ def _vjps_in_2d(v, jacs): # TODO XXX: reshape v once for all to speed up computa
 def t_linear_bkwd2_p(dloss_dx, layer_params, x): # input: N x D
     outdim = layer_params[1].shape[0]
 
-    jac1 = t_proj_bkwd_p(layer_params[0], x)
+    dloss_dp0 = t_proj_bkwd2_p(dloss_dx, layer_params[0], x)
     jac2 = torch.eye(outdim, device=x.device).expand(x.shape[:-1] + (outdim, outdim))
-        
-    return _vjp_in_2d(dloss_dx, jac1), _vjp_in_2d(dloss_dx, jac2)
+
+    return dloss_dp0, _vjp_in_2d(dloss_dx, jac2)
 
 def t_linear_bkwd_x(layer_params, x): # input: N x D
     return t_proj_bkwd_x(layer_params[0], x)
