@@ -178,7 +178,14 @@ def my_t_proj_bkwd_p(layer_params, x): # input: seq_len x emb_dim
     return (jac*aux).reshape(outdims + layer_params.shape)
 
 def t_proj_bkwd2_p(dloss_dx, layer_params, x): # input: N x D
-    return _vjp_in_2d(dloss_dx, t_proj_bkwd_p(layer_params, x))
+    # Note that using vjp instead of jacrev results in notiecable difference
+    # in results, in particular dloss_dp[0][0] for the whole GPT2 is affected
+    # TODO XXX: Investigate why this is happening
+    # (It's possible we don't need to do it if we write our own rowise jacobian for bmms)
+    (res, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
+    return vjpfunc(dloss_dx)[0]
+    #return _vjp_in_2d(dloss_dx, t_proj_bkwd_p(layer_params, x))
+
 
 # TODO XXX: Placebolder. Code up Jacobian for bmm
 def t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
@@ -201,7 +208,10 @@ def my_t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
     return (jac*aux).reshape(outdims + indims)
 
 def t_proj_bkwd2_x(dloss_dx, layer_params, x):
-    return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params, x))
+    # TODO XXX: check whether it affects numerical values as t_proj_bkwd2_p does or not
+    (_, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
+    return vjpfunc(dloss_dx)[1]
+    #return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params, x))
 
 def t_softmax_attn_fwd(q, k, mask, train, p_gen_aux=None):
     D = q.shape[-1]
