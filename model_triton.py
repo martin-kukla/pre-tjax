@@ -657,10 +657,8 @@ def t_layernorm_bkwd_x(layer_params, x):
 
 def t_layernorm_bkwd2_x(dloss_dx, layer_params, x):
     x_2d = x.reshape((-1, x.shape[-1]))
-    jac_x_2d = (layer_params[0] * normalized_x_bkwd(x_2d)).transpose(-3,-1)
-    jac = jac_x_2d.reshape(x.shape + x.shape)
-    
-    return _vjp_in_2d(dloss_dx, jac)
+    jac_x_2d = (layer_params[0] * normalized_x_bkwd_rowwise(x_2d)).transpose(-2,-1)
+    return _vjp_in_2d_rowise(dloss_dx, jac_x_2d)
     
 def t_gpt2_tlayer_sublock1_fwd(layer_params, y, mask, train=True, p_gen_aux=None):
     if not train:
