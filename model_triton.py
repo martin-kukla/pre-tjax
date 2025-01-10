@@ -87,17 +87,14 @@ def t_embed_bkwd2(dloss_dx, layer_params, x): # input: 1 x
     x_1d = x.reshape(-1)
     
     emb_size = layer_params[0].shape[1]    
-    fn_outdim = torch.numel(x) * emb_size
-    fn_indim =  torch.numel(layer_params[0]) # jacobian with respect to params
-    jac = torch.zeros(fn_outdim, fn_indim, device=x.device)
-    
-    indices = torch.tile(torch.arange(emb_size, device=x.device), (x.numel(), 1))
-    indices = ((x_1d * emb_size).unsqueeze(1) + indices).reshape(-1, 1)
-    jac.scatter_(1, indices, math.sqrt(emb_size))
-    
-    jac = jac.reshape( x.shape + (emb_size, layer_params[0].shape[0], layer_params[0].shape[1]))
-    
-    return (_vjp_in_2d(dloss_dx, jac), )
+    # Note, in order to save space, don't create full Jacobian.
+    # The Full Jacobian would be BS x N x D x V x D (two last dims are params, and V is vocab size)
+    # Instead, we only need information to which vabulary each position maps
+    # i.e. Jacobian of shape: BS x N x V
+    jac = torch.zeros(torch.numel(x), layer_params[0].shape[0], device=x.device)
+    jac.scatter_(1, x_1d.unsqueeze(1).to(torch.int64), math.sqrt(emb_size))
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    return (torch.matmul(dloss_dx_2d.t(), jac).t(), )
     
 
 def t_relu_fwd(x):
@@ -133,6 +130,7 @@ def t_linear_bkwd_p(layer_params, x): # input: N x D
 
 def _vjp_in_2d(v, jac):
     outdim = jac.shape[len(v.shape):]
+    # TODO: It's just vector times matrix, is there cleaner/more efficient way of doing this?
     res = torch.matmul(v.reshape((1, -1)), jac.reshape((v.numel(), -1)))
     return res.reshape(outdim)
 
