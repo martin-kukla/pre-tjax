@@ -620,6 +620,14 @@ def t_layernorm_bkwd2_p(dloss_dx, layer_params, x):
     return _vjp_in_2d(dloss_dx, jac1 *jac1_aux), _vjp_in_2d(dloss_dx, jac2)
 
 def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
+    BS = x.shape[0]
+    N = x.shape[-1]
+    
+    jac = normalized_x_bkwd_rowwise(x)
+    jac = torch.block_diag(*jac.unbind(0)).reshape(BS, N, BS, N)
+    return jac
+
+def normalized_x_bkwd_rowwise(x): # d [(x-x_mean)/x_std] / dx
     # Note, below is "shorten Jacobian": rows are independent, so zeros in result are skipped.
     def std_bkwd(x):
         N = x.shape[-1]
@@ -638,7 +646,7 @@ def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
     g_pow2 = 1/torch.pow(x_std, 2)
 
     jac = g_pow2.unsqueeze(-1) * (fdx_g  - f_gdx)
-    return torch.block_diag(*jac.unbind(0)).reshape(BS, N, BS, N)
+    return jac
 
 def t_layernorm_bkwd_x(layer_params, x):
     x_2d = x.reshape((-1, x.shape[-1]))
