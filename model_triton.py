@@ -49,9 +49,9 @@ def t_log_softmax_bkwd2(dloss_dx, x_logits):
     
     # TODO XXX: can I use expand for the below line?
     jac = torch.repeat_interleave(-torch.exp(x_logits), N, dim=0, output_size=x_logits.numel())
-    jac = jac.reshape(BS, N, N)
+    jac = jac.reshape(BS, N, N)/exp_logsums
     jac_eye = torch.eye(N, device=x_logits.device).unsqueeze(0).expand(BS, N, N)
-    jac = (exp_logsums * jac_eye + jac) / exp_logsums
+    jac = jac_eye + jac
 
     # Since it's only rowise dependency of outputs on inputs, we don't create full jacobian.
     # Instead, we compute VJP in rowise fashion:
