@@ -300,8 +300,11 @@ def t_scaled_dot_prod_attn_bkwd2(dloss_dx, qkv, mask, train=True, p_gen_aux=None
     # TODO XXX: code up jacobian for bmm
     from torch.func import jacrev
     bbm_fn = lambda m1, m2: torch.matmul(m1, m2)
-    jac_bmm_sa, jac_v = jacrev(bbm_fn, argnums=(0,1))(sa, v)
-    dloss_dsa, dloss_dv = _vjps_in_2d(dloss_dx, [jac_bmm_sa, jac_v])
+    # TODO XXX XXX: Investigate why the numerical differences between jacrev and vjp
+    # jac_bmm_sa, jac_v = jacrev(bbm_fn, argnums=(0,1))(sa, v)
+    # dloss_dsa, dloss_dv = _vjps_in_2d(dloss_dx, [jac_bmm_sa, jac_v])
+    (_, vjpfunc) = torch.func.vjp(bbm_fn, sa, v)
+    dloss_dsa, dloss_dv = vjpfunc(dloss_dx)
     dloss_dq, dloss_dk = t_softmax_attn_bkwd2(dloss_dsa, q, k, mask, train, p_gen_aux)
     
     return dloss_dq, dloss_dk, dloss_dv
