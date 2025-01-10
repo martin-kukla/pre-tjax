@@ -584,9 +584,13 @@ def t_dropout_bkwd(x, train=True, p_gen_aux=None):
     return eyed_jac * mask
 
 def t_dropout_bkwd2(dloss_dx, x, train=True, p_gen_aux=None):
-    jac_dropout = t_dropout_bkwd(x, train, p_gen_aux)
-    
-    return _vjp_in_2d(dloss_dx, jac_dropout)
+    if not train: # we will never use this jacobian..
+        return dloss_dx * (1-DROPOUT_RATE)
+
+    assert p_gen_aux is not None
+    generator = torch.Generator(device=x.device).manual_seed(p_gen_aux)
+    mask = torch.bernoulli(torch.full_like(x, 1-DROPOUT_RATE), generator=generator) 
+    return dloss_dx * mask
 
 def t_layernorm_fwd(layer_params, x):
     x_mean = torch.mean(x, axis=-1, keepdims=True)
