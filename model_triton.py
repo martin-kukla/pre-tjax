@@ -180,7 +180,7 @@ def my_t_proj_bkwd_p(layer_params, x): # input: seq_len x emb_dim
 def t_proj_bkwd2_p(dloss_dx, layer_params, x): # input: N x D
     # Note that using vjp instead of jacrev results in notiecable difference
     # in results, in particular dloss_dp[0][0] for the whole GPT2 is affected
-    # TODO XXX: Investigate why this is happening
+    # TODO XXX XXX: Investigate why this is happening
     # (It's possible we don't need to do it if we write our own rowise jacobian for bmms)
     (res, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
     return vjpfunc(dloss_dx)[0]
@@ -208,7 +208,7 @@ def my_t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
     return (jac*aux).reshape(outdims + indims)
 
 def t_proj_bkwd2_x(dloss_dx, layer_params, x):
-    # TODO XXX: check whether it affects numerical values as t_proj_bkwd2_p does or not
+    # TODO XXX XXX: check whether it affects numerical values as t_proj_bkwd2_p does or not
     (_, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
     return vjpfunc(dloss_dx)[1]
     #return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params, x))
@@ -1004,8 +1004,7 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     y_in = y
     indices = torch.arange(y.shape[1], device=y.device).unsqueeze(0).expand(*y.shape) # we ignore indices arg
     y = t_embed_fwd(params[0], y)
-    # TODO: move the below line, and start using t_dropout_bkwd2
-    jac_dropout = t_dropout_bkwd(y + params[1][0], train, p_gen_aux[0])
+    t_dropout_input = y + params[1][0]
     y = t_dropout_fwd(y + params[1][0], train, p_gen_aux[0])
     
     layers_inputs = []
@@ -1033,8 +1032,7 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     layers_dloss_dp = list(reversed(layers_dloss_dp)) # TODO XXX: clean up list+ reversed combos
     
     # dropout + embed + pos_enc
-    dloss_dx = _vjp_in_2d(dloss_dx, jac_dropout)
-    
+    dloss_dx = t_dropout_bkwd2(dloss_dx, t_dropout_input, train, p_gen_aux[0])
     embed_dloss_dp = t_embed_bkwd2(dloss_dx, params[0], y_in)
     # Due to tying of embedding and final projection layers,
     # we need to fill zeroed gradient with respect to biases:
