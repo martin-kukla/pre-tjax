@@ -770,8 +770,7 @@ def t_gpt2_tlayer_sublock1_bkwd2(dloss_dx, layer_params, y, mask, train=True, p_
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y_in)
     dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y_in)
     # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
-    jac_y = torch.eye(y.numel(), device=y.device).reshape(blck_dloss_dx.shape + blck_dloss_dx.shape)
-    dloss_dx = _vjp_in_2d(blck_dloss_dx, jac_y) + dloss_dx
+    dloss_dx = blck_dloss_dx + dloss_dx
     dloss_dp = layernorm_dloss_dp + tlayer_attn_dloss_dp
     
     return dloss_dx, dloss_dp
@@ -859,8 +858,7 @@ def t_gpt2_tlayer_sublock2_bkwd2(dloss_dx, layer_params, y, train=True, p_gen_au
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y_in)
     dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y_in)
     # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
-    jac_y = torch.eye(y.numel(), device=y.device).reshape(blck_dloss_dx.shape +blck_dloss_dx.shape)    
-    dloss_dx = _vjp_in_2d(blck_dloss_dx, jac_y) + dloss_dx
+    dloss_dx = blck_dloss_dx + dloss_dx
     dloss_dp = layernorm_dloss_dp + tlayer_ffn_dloss_dp
     
     return dloss_dx, dloss_dp
