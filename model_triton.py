@@ -82,18 +82,22 @@ def t_embed_bkwd(layer_params, x): # input: 1 x
     return (jac.reshape( x.shape + (emb_size, layer_params[0].shape[0], layer_params[0].shape[1])), )
 
 def t_embed_bkwd2(dloss_dx, layer_params, x): # input: 1 x
+    emb_size = layer_params[0].shape[1]
+    return t_indexing_bkwd2(dloss_dx, layer_params, x, math.sqrt(emb_size))
+
+# VJP for operation of indexing "layer_params[x]".
+# Apply additional coef to Jacobian before multipliation
+def t_indexing_bkwd2(dloss_dx, layer_params, x, coef=1):
     x_1d = x.reshape(-1)
     
-    emb_size = layer_params[0].shape[1]    
     # Note, in order to save space, don't create full Jacobian.
     # The Full Jacobian would be BS x N x D x V x D (two last dims are params, and V is vocab size)
     # Instead, we only need information to which vabulary each position maps
     # i.e. Jacobian of shape: BS x N x V
     jac = torch.zeros(torch.numel(x), layer_params[0].shape[0], device=x.device)
-    jac.scatter_(1, x_1d.unsqueeze(1).to(torch.int64), math.sqrt(emb_size))
+    jac.scatter_(1, x_1d.unsqueeze(1).to(torch.int64), coef)
     dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
     return (torch.matmul(dloss_dx_2d.t(), jac).t(), )
-    
 
 def t_relu_fwd(x):
     return torch.where(torch.le(x, 0), 0, x) # as inputs are broadcastable in where&le - follows pytorch's implementation
@@ -1043,15 +1047,9 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     # Due to tying of embedding and final projection layers,
     # we need to fill zeroed gradient with respect to biases:
     embed_dloss_dp = [embed_dloss_dp[0], torch.zeros(embed_dloss_dp[0].shape[:-1], device=y_in.device)]
-    
-    # TODO XXX: code up bkwd2 for pos_enc, so we don't reuse t_embed_bkwd
-    # Reuse t_embed_bkwd to compute jacobian of pos_encoding
-    # Need to account for lack of  1/ sqrt(emb_dim)
-    jac_pos_enc = list(t_embed_bkwd(params[1], indices))
-    jac_pos_enc[0][jac_pos_enc[0]!=0] = 1
-    jac_pos_enc[0] =_vjp_in_2d(dloss_dx, jac_pos_enc[0])
+    pos_enc_dloss_dp = t_indexing_bkwd2(dloss_dx, params[1], indices)
 
-    dloss_dp = [embed_dloss_dp, jac_pos_enc] + layers_dloss_dp + [layernorm_dloss_dp]
+    dloss_dp = [embed_dloss_dp, pos_enc_dloss_dp] + layers_dloss_dp + [layernorm_dloss_dp]
     return tuple(dloss_dp)
 
 def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
