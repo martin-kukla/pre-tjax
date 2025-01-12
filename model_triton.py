@@ -47,9 +47,8 @@ def t_log_softmax_bkwd2(dloss_dx, x_logits):
     logsums = torch.logsumexp(x_logits, axis=-1, keepdims=True)
     exp_logsums = torch.exp(logsums) # Q: is it going to be numerically stable?
 
-    # TODO XXX: I can either use expand here, or multiply directly with dloss_dx, so I save space
-    jac = torch.repeat_interleave(-torch.exp(x_logits)/exp_logsums, N, dim=0, output_size=x_logits.numel())
-    jac = jac.reshape(BS, N, N)
+    # TODO XXX: multiply dloss_dx inbefore expanding to higher dimension
+    jac = (-torch.exp(x_logits)/exp_logsums).unsqueeze(1).expand(BS, N, N)
     # As it's rowwise dependency of outputs on inputs, we don't use full jacobian.
     return dloss_dx + _vjp_in_2d_rowise(dloss_dx, jac)
 
