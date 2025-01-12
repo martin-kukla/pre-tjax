@@ -129,8 +129,8 @@ def t_linear_bkwd_p(layer_params, x): # input: N x D
 def _vjp_in_2d(v, jac):
     outdim = jac.shape[len(v.shape):]
     # TODO: It's just vector times matrix, is there cleaner/more efficient way of doing this?
-    res = torch.matmul(v.reshape((1, -1)), jac.reshape((v.numel(), -1)))
-    return res.reshape(outdim)
+    res = torch.matmul(v.view((1, -1)), jac.reshape((v.numel(), -1)))
+    return res.view(outdim)
 
 # Do VJP row-wise. Useful when a row doesn't depend on other rows (saves space)
 def _vjp_in_2d_rowise(dloss_dx, rowise_jac): # dloss_dx: ... x IN_DIM, rowise_jac: BS x IN_DIM x OUT_DIM
