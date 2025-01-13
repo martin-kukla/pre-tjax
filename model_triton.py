@@ -658,11 +658,9 @@ def normalized_x_bkwd_rowwise(x): # d [(x-x_mean)/x_std] / dx
     x_std = torch.std(x, axis=-1, keepdims = True)
      
     x_eye = torch.eye(N, device=x.device).expand(x.shape[0], N, N)
-    fdx_g = (x_eye - 1/N) *x_std.unsqueeze(-1)
-    f_gdx = torch.matmul((x-x_mean).unsqueeze(-1), std_bkwd(x).unsqueeze(-2)) 
-    g_pow2 = 1/torch.pow(x_std, 2)
-
-    jac = g_pow2.unsqueeze(-1) * (fdx_g  - f_gdx)
+    jac = (x_eye - 1/N) *x_std.unsqueeze(-1) # fdx_g
+    jac.sub_(torch.matmul((x-x_mean).unsqueeze(-1), std_bkwd(x).unsqueeze(-2))) # - f_gdx
+    jac.mul_(1/torch.pow(x_std, 2).unsqueeze(-1)) # * g_pow2
     return jac
 
 def t_layernorm_bkwd_x(layer_params, x):
