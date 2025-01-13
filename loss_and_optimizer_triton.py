@@ -54,7 +54,24 @@ def t_avg_cross_entropy_loss_bkwd2(y_labels, x_logits):
     dloss_dx = torch.zeros_like(x_logits_2d) # bkwd for indexing
     y_labels_1d = y_labels_1d.to(torch.int64) # HOTFIX. TODO XXX: Think whether we shouldn't pass ys in int64 instead?
     dloss_dx.scatter_(1, y_labels_1d.unsqueeze(1), jac_nanmean.unsqueeze(1))
-    dloss_dx = t_log_softmax_bkwd2(dloss_dx, x_logits_2d)
+    
+    # "Fused" t_log_softmax_bkwd2 with t_avg_cross_entropy_loss_bkwd2:
+    # t_log_softmax_bkwd2 alone would create (BS, V, V) tensor, where V is vocabulary size.
+    # By swapping order of ops, we don't need to create full (BS, V, V).
+    # This only applies in context of avg_cross_entopy_loss_bkwd2, as dloss_dx
+    # has 1-of-N encodings as vectors.
+    def fused_t_log_softmax_bkwd2(dloss_dx, y_labels_1d, jac_nanmean, x_logits):
+        BS, N = x_logits.shape
+
+        x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0]
+        logsums = torch.logsumexp(x_logits, axis=-1, keepdims=True)
+        exp_logsums = torch.exp(logsums) # Q: is it going to be numerically stable?
+
+        n_jac = -torch.exp(x_logits)/exp_logsums
+        dloss_dx.add_(jac_nanmean.unsqueeze(1) * n_jac)
+        return dloss_dx
+    #dloss_dx = t_log_softmax_bkwd2(dloss_dx, x_logits_2d)
+    dloss_dx = fused_t_log_softmax_bkwd2(dloss_dx, y_labels_1d, jac_nanmean, x_logits_2d)
     
     return dloss_dx.reshape(x_logits.shape)
 
