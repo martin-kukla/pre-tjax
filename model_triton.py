@@ -669,15 +669,14 @@ def normalized_x_bkwd2(dloss_dx, x): # d [(x-x_mean)/x_std] / dx
     # f(x) = x - x_mean, g(x) = x_std
     BS, N = x.shape
     x_mean = torch.mean(x, axis=-1, keepdims=True)
-    x_std = torch.std(x, axis=-1, keepdims = True)
-     
+    x_rstd = 1/torch.std(x, axis=-1, keepdims = True)
+    x_norm = (x - x_mean) * x_rstd
+    
     x_eye = torch.eye(N, device=x.device).expand(BS, N, N)
-    jac = (x_eye - 1/N) *x_std.unsqueeze(-1) # fdx_g
-    std_bkwd = 1 / (x_std * (N-1)) * (x - x_mean)
-    f_gdx = torch.matmul((x-x_mean).unsqueeze(-1), std_bkwd.unsqueeze(-2))
-    jac.sub_(f_gdx) # - f_gdx
-    jac.mul_(1/torch.pow(x_std, 2).unsqueeze(-1)) # * g_pow2
-    return _vjp_in_2d_rowise(dloss_dx, jac.transpose(-2,-1))
+    f_gdx =  torch.matmul(x_norm.unsqueeze(-1), x_norm.unsqueeze(-2)/(N-1)) 
+    jac = (x_eye - 1/N - f_gdx) *x_rstd.unsqueeze(-1)
+    
+    return _vjp_in_2d_rowise(dloss_dx, jac.transpose(-2,-1)) 
 
 def t_layernorm_bkwd_x(layer_params, x):
     x_2d = x.reshape((-1, x.shape[-1]))
