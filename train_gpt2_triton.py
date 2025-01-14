@@ -5,9 +5,9 @@
 ###############################################
 import argparse
 parser = argparse.ArgumentParser("train_gpt2_trition")
-parser.add_argument("backend", help="Either 'torchfunc_jit', 'debug_jacs' or 'triton'.", type=str)
+parser.add_argument("backend", help="Either 'torchfunc_jit' or 'triton'.", type=str)
 args = parser.parse_args()
-assert args.backend in ["torchfunc_jit", "debug_jacs", "triton"]
+assert args.backend in ["torchfunc_jit", "triton", "debug_jacs"]
 
 ###############################################
 ### DATASETs
