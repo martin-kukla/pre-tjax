@@ -667,20 +667,14 @@ def normalized_x_bkwd_rowwise(x): # d [(x-x_mean)/x_std] / dx
 # normalized_x_bkwd_rowwise returns jacobian which needs to be transposed.
 def normalized_x_bkwd2(dloss_dx, x): # d [(x-x_mean)/x_std] / dx
     # f(x) = x - x_mean, g(x) = x_std
-    # Note, below is "shorten Jacobian": rows are independent, so zeros in result are skipped.
-    def std_bkwd(x):
-        N = x.shape[-1]
-        x_mean = torch.mean(x, axis=-1, keepdims=True)
-        x_std = torch.std(x, axis=-1, keepdims = True)
-        return 1 / (x_std * (N-1)) * (x - x_mean)
-
     BS, N = x.shape
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims = True)
      
     x_eye = torch.eye(N, device=x.device).expand(BS, N, N)
     jac = (x_eye - 1/N) *x_std.unsqueeze(-1) # fdx_g
-    f_gdx = torch.matmul((x-x_mean).unsqueeze(-1), std_bkwd(x).unsqueeze(-2))
+    std_bkwd = 1 / (x_std * (N-1)) * (x - x_mean)
+    f_gdx = torch.matmul((x-x_mean).unsqueeze(-1), std_bkwd.unsqueeze(-2))
     jac.sub_(f_gdx) # - f_gdx
     jac.mul_(1/torch.pow(x_std, 2).unsqueeze(-1)) # * g_pow2
     return _vjp_in_2d_rowise(dloss_dx, jac.transpose(-2,-1))
