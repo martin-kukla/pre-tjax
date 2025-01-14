@@ -644,6 +644,7 @@ def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
     return jac
 
 def normalized_x_bkwd_rowwise(x): # d [(x-x_mean)/x_std] / dx
+    # f(x) = x - x_mean, g(x) = x_std
     # Note, below is "shorten Jacobian": rows are independent, so zeros in result are skipped.
     def std_bkwd(x):
         N = x.shape[-1]
@@ -651,12 +652,11 @@ def normalized_x_bkwd_rowwise(x): # d [(x-x_mean)/x_std] / dx
         x_std = torch.std(x, axis=-1, keepdims = True)
         return 1 / (x_std * (N-1)) * (x - x_mean)
 
-    BS = x.shape[0]
-    N = x.shape[-1]
+    BS, N = x.shape
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims = True)
      
-    x_eye = torch.eye(N, device=x.device).expand(x.shape[0], N, N)
+    x_eye = torch.eye(N, device=x.device).expand(BS, N, N)
     jac = (x_eye - 1/N) *x_std.unsqueeze(-1) # fdx_g
     jac.sub_(torch.matmul((x-x_mean).unsqueeze(-1), std_bkwd(x).unsqueeze(-2))) # - f_gdx
     jac.mul_(1/torch.pow(x_std, 2).unsqueeze(-1)) # * g_pow2
