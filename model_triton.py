@@ -678,6 +678,20 @@ def normalized_x_bkwd2(dloss_dx, x): # d [(x-x_mean)/x_std] / dx
     
     return _vjp_in_2d_rowise(dloss_dx, jac.transpose(-2,-1)) 
 
+# TODO XXX XXX: investigate why this is more memory efficient than my implementation above
+# (Inspired from llm.c)
+def normalized_x_bkwd2_plus(dloss_dx, x): # d [(x-x_mean)/x_std] / dx
+    # f(x) = x - x_mean, g(x) = x_std
+    BS, N = x.shape
+    x_mean = torch.mean(x, axis=-1, keepdims=True)
+    x_rstd = 1/torch.std(x, axis=-1, keepdims = True)
+    x_norm = (x - x_mean) * x_rstd
+    
+    n_adj = N/(N-1)
+    dloss_dx = dloss_dx - dloss_dx.mean(-1, keepdim=True) - x_norm * (dloss_dx * x_norm).mean(-1, keepdim=True) * n_adj
+    dloss_dx *= x_rstd
+    return dloss_dx
+
 def t_layernorm_bkwd_x(layer_params, x):
     x_2d = x.reshape((-1, x.shape[-1]))
     jac_x_2d = (layer_params[0] * normalized_x_bkwd(x_2d)).transpose(-3,-1)
@@ -685,7 +699,10 @@ def t_layernorm_bkwd_x(layer_params, x):
 
 def t_layernorm_bkwd2_x(dloss_dx, layer_params, x):
     x_2d = x.reshape((-1, x.shape[-1]))
-    return normalized_x_bkwd2(dloss_dx * layer_params[0], x_2d)
+    # TODO XXX XXX: investigate the difference in memory consumption between two
+    #return normalized_x_bkwd2(dloss_dx * layer_params[0], x_2d)
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    return normalized_x_bkwd2_plus(dloss_dx_2d * layer_params[0], x_2d).reshape(dloss_dx.shape)
     
 def t_gpt2_tlayer_sublock1_fwd(layer_params, y, mask, train=True, p_gen_aux=None):
     if not train:
