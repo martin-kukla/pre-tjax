@@ -662,6 +662,29 @@ def normalized_x_bkwd_rowwise(x): # d [(x-x_mean)/x_std] / dx
     jac.mul_(1/torch.pow(x_std, 2).unsqueeze(-1)) # * g_pow2
     return jac
 
+# Note that there is one semantic difference between this 
+# and normalized_x_bkwd_rowwise (beside vjp):
+# normalized_x_bkwd_rowwise returns jacobian which needs to be transposed.
+def normalized_x_bkwd2(dloss_dx, x): # d [(x-x_mean)/x_std] / dx
+    # f(x) = x - x_mean, g(x) = x_std
+    # Note, below is "shorten Jacobian": rows are independent, so zeros in result are skipped.
+    def std_bkwd(x):
+        N = x.shape[-1]
+        x_mean = torch.mean(x, axis=-1, keepdims=True)
+        x_std = torch.std(x, axis=-1, keepdims = True)
+        return 1 / (x_std * (N-1)) * (x - x_mean)
+
+    BS, N = x.shape
+    x_mean = torch.mean(x, axis=-1, keepdims=True)
+    x_std = torch.std(x, axis=-1, keepdims = True)
+     
+    x_eye = torch.eye(N, device=x.device).expand(BS, N, N)
+    jac = (x_eye - 1/N) *x_std.unsqueeze(-1) # fdx_g
+    f_gdx = torch.matmul((x-x_mean).unsqueeze(-1), std_bkwd(x).unsqueeze(-2))
+    jac.sub_(f_gdx) # - f_gdx
+    jac.mul_(1/torch.pow(x_std, 2).unsqueeze(-1)) # * g_pow2
+    return _vjp_in_2d_rowise(dloss_dx, jac.transpose(-2,-1))
+
 def t_layernorm_bkwd_x(layer_params, x):
     x_2d = x.reshape((-1, x.shape[-1]))
     jac_x_2d = (layer_params[0] * normalized_x_bkwd(x_2d)).transpose(-3,-1)
@@ -669,8 +692,7 @@ def t_layernorm_bkwd_x(layer_params, x):
 
 def t_layernorm_bkwd2_x(dloss_dx, layer_params, x):
     x_2d = x.reshape((-1, x.shape[-1]))
-    jac_x_2d = (layer_params[0] * normalized_x_bkwd_rowwise(x_2d)).transpose(-2,-1)
-    return _vjp_in_2d_rowise(dloss_dx, jac_x_2d)
+    return normalized_x_bkwd2(dloss_dx * layer_params[0], x_2d)
     
 def t_gpt2_tlayer_sublock1_fwd(layer_params, y, mask, train=True, p_gen_aux=None):
     if not train:
