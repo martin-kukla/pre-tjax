@@ -2,14 +2,13 @@
 
 Transformers written from first principle in JAX/Torch.Func/Triton; Comparison of their training efficiency on 1GPU
 
-# Updates:
-
-- **15th January**: Coded up memory-efficient backward pass for pytroch implementation from first principle. This can operate on the equally big model (and same data volume) as `torch.func+autograd+jit` version. Currently, my backward implementation is 16times (sic!) slower than `torch.func+autograd+jit` one.
-
 # How to use:
 - For JAX: `python train_gpt2_jax.py`
 - For torch.func+autograd+jit: `python train_gpt2_triton.py torchfunc_jit`
 - For Triton (WIP):  `python train_gpt2_triton.py triton`
+  
+# Updates:
+- **15th January 2025**: Coded up memory-efficient backward pass for pytroch implementation from first principle. This can operate on the equally big model (and same data volume) as `torch.func+autograd+jit` version. Currently, my backward implementation is 16times (sic!) slower than `torch.func+autograd+jit` one.
 
 # Files
 - **train_aiayn_jax.py**: (almost) replicates the results from AIAYN paper (signle GPU only). Exploration into how feasible (& easy) it is to write very efficient code in JAX for GPU
