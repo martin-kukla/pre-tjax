@@ -1,4 +1,15 @@
 ###############################################
+# This script can be used for training GPT2 model using
+# two different ml engines: torch.func+jit and triton.
+# See below for specifying correct ml engine
+###############################################
+import argparse
+parser = argparse.ArgumentParser("train_gpt2_trition")
+parser.add_argument("backend", help="Either 'torchfunc_jit' or 'triton'.", type=str)
+args = parser.parse_args()
+assert args.backend in ["torchfunc_jit", "triton", "debug_jacs"]
+
+###############################################
 ### DATASETs
 ###############################################
 import datasets
@@ -40,6 +51,15 @@ print(f'Number of params: {count_num_params(params):_}')
 # ### Loss + Grads + Optimizers
 from loss_and_optimizer_triton import loss_train, loss_eval, grad_loss, acc_grad_loss, t_acc_grad_loss, t_acc_grad_loss2, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms # TODO XXX: add remaining
 # from loss_and_optimizer import loss_train, loss_eval, log_probs, grad_loss, predict, acc_grad_loss, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms
+
+# Choose the accumulation gradient loss function depending on the selected ML backend
+# TODO XXX: differentiate forward func too
+if args.backend =="torchfunc_jit":
+    acc_grad_loss_func =  acc_grad_loss
+elif args.backend =="debug_jacs":
+    acc_grad_loss_func = t_acc_grad_loss
+else:
+    acc_grad_loss_func = t_acc_grad_loss2
 
 # # Figure out non bias/gain params, as we only want to apply weight decay to those in AdamW
 # # Only 1D weights, which are initialized to 0s are bias/gain params (including bias of LayerNorm)
@@ -170,9 +190,7 @@ while True:
         # Training step
         # TODO: introduce update func, which does grad_loss and adam, and then call/jit that function instead of calling/jitting two separate ones
         # TODO XXX: int32 for y? we could use uint16 if it were available
-        #grads, (loss_val, acc, _) = t_acc_grad_loss2(grads, params, torch.tensor(y, dtype=torch.int32, device="cuda"), torch.tensor(y_mask, dtype=torch.bool, device="cuda"), torch.tensor(y_indices, dtype=torch.int, device="cuda"))
-        #grads, (loss_val, acc, _) = t_acc_grad_loss(grads, params, torch.tensor(y, dtype=torch.int32, device="cuda"), torch.tensor(y_mask, dtype=torch.bool, device="cuda"), torch.tensor(y_indices, dtype=torch.int, device="cuda"))
-        grads, (loss_val, acc, _) = acc_grad_loss(grads, params, torch.tensor(y, dtype=torch.int32, device="cuda"), torch.tensor(y_mask, dtype=torch.bool, device="cuda"), torch.tensor(y_indices, dtype=torch.int, device="cuda"))
+        grads, (loss_val, acc, _) = acc_grad_loss_func(grads, params, torch.tensor(y, dtype=torch.int32, device="cuda"), torch.tensor(y_mask, dtype=torch.bool, device="cuda"), torch.tensor(y_indices, dtype=torch.int, device="cuda"))
         #grads, (loss_val, acc) = grad_loss(params, jnp.array(x), jnp.array(y), key_iter)
 
         # LR Scheduler

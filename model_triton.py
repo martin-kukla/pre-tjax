@@ -45,17 +45,22 @@ def t_log_softmax_bkwd2(dloss_dx, x_logits):
     
     x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0]
     logsums = torch.logsumexp(x_logits, axis=-1, keepdims=True)
-    exp_logsums = torch.exp(logsums).unsqueeze(2) # Q: is it going to be numerically stable?
+    exp_logsums = torch.exp(logsums) # Q: is it going to be numerically stable?
+
+    # TODO XXX: Add comments on maths why we can do elementwise VJP here
+    jac = -torch.exp(x_logits)/exp_logsums
+    return dloss_dx + dloss_dx.sum(-1, keepdim=True)*jac.reshape(dloss_dx.shape)
+
+#     jac_eye = torch.eye(N, device=x_logits.device).unsqueeze(0).expand(BS, N, N)
+#     jac = jac_eye + jac
+
+#     # Since it's only rowise dependency of outputs on inputs, we don't create full jacobian.
+#     # Instead, we compute VJP in rowise fashion:
+#     # jac_softmax = torch.block_diag(*jac.unbind(0)).reshape(indims+indims)
+#     # dloss_dx = _vjp_in_2d(dloss_dx, jac_softmax)
+#     dloss_dx = _vjp_in_2d_rowise(dloss_dx, jac)
     
-    # TODO XXX: can I use expand for the below line?
-    jac = torch.repeat_interleave(-torch.exp(x_logits), N, dim=0, output_size=x_logits.numel())
-    jac = jac.reshape(BS, N, N)
-    jac_eye = torch.eye(N, device=x_logits.device).unsqueeze(0).expand(BS, N, N)
-    jac = (exp_logsums * jac_eye + jac) / exp_logsums
-    jac_softmax = torch.block_diag(*jac.unbind(0)).reshape(indims+indims)
-    
-    dloss_dx = _vjp_in_2d(dloss_dx, jac_softmax)
-    return dloss_dx
+#     return dloss_dx
 
 def t_embed_fwd(layer_params, x): # input: 1 x
     return layer_params[0][x] * math.sqrt(layer_params[0].shape[1]) # since layer_params[0] is vocab_size x emb_dim
@@ -75,21 +80,22 @@ def t_embed_bkwd(layer_params, x): # input: 1 x
     return (jac.reshape( x.shape + (emb_size, layer_params[0].shape[0], layer_params[0].shape[1])), )
 
 def t_embed_bkwd2(dloss_dx, layer_params, x): # input: 1 x
+    emb_size = layer_params[0].shape[1]
+    return t_indexing_bkwd2(dloss_dx, layer_params, x, math.sqrt(emb_size))
+
+# VJP for operation of indexing "layer_params[x]".
+# Apply additional coef to Jacobian before multipliation
+def t_indexing_bkwd2(dloss_dx, layer_params, x, coef=1):
     x_1d = x.reshape(-1)
     
-    emb_size = layer_params[0].shape[1]    
-    fn_outdim = torch.numel(x) * emb_size
-    fn_indim =  torch.numel(layer_params[0]) # jacobian with respect to params
-    jac = torch.zeros(fn_outdim, fn_indim, device=x.device)
-    
-    indices = torch.tile(torch.arange(emb_size, device=x.device), (x.numel(), 1))
-    indices = ((x_1d * emb_size).unsqueeze(1) + indices).reshape(-1, 1)
-    jac.scatter_(1, indices, math.sqrt(emb_size))
-    
-    jac = jac.reshape( x.shape + (emb_size, layer_params[0].shape[0], layer_params[0].shape[1]))
-    
-    return (_vjp_in_2d(dloss_dx, jac), )
-    
+    # Note, in order to save space, don't create full Jacobian.
+    # The Full Jacobian would be BS x N x D x V x D (two last dims are params, and V is vocab size)
+    # Instead, we only need information to which vabulary each position maps
+    # i.e. Jacobian of shape: BS x N x V
+    jac = torch.zeros(torch.numel(x), layer_params[0].shape[0], device=x.device)
+    jac.scatter_(1, x_1d.unsqueeze(1).to(torch.int64), coef)
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    return (torch.matmul(dloss_dx_2d.t(), jac).t(), )
 
 def t_relu_fwd(x):
     return torch.where(torch.le(x, 0), 0, x) # as inputs are broadcastable in where&le - follows pytorch's implementation
@@ -124,26 +130,32 @@ def t_linear_bkwd_p(layer_params, x): # input: N x D
 
 def _vjp_in_2d(v, jac):
     outdim = jac.shape[len(v.shape):]
-    res = torch.matmul(v.reshape((1, -1)), jac.reshape((v.numel(), -1)))
-    return res.reshape(outdim)
+    # TODO: It's just vector times matrix, is there cleaner/more efficient way of doing this?
+    res = torch.matmul(v.view((1, -1)), jac.reshape((v.numel(), -1)))
+    return res.view(outdim)
+
+# Do VJP row-wise. Useful when a row doesn't depend on other rows (saves space)
+def _vjp_in_2d_rowise(dloss_dx, rowise_jac): # dloss_dx: ... x IN_DIM, rowise_jac: BS x IN_DIM x OUT_DIM
+    outdim = dloss_dx.shape[:-1] + rowise_jac.shape[-1:]
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    dloss_dx = torch.matmul(dloss_dx_2d.unsqueeze(1), rowise_jac).squeeze(1)
+    return dloss_dx.reshape(outdim)
 
 def _vjps_in_2d(v, jacs): # TODO XXX: reshape v once for all to speed up computation?
     return [_vjp_in_2d(v, j) for j in jacs] 
 
 def t_linear_bkwd2_p(dloss_dx, layer_params, x): # input: N x D
     outdim = layer_params[1].shape[0]
+    dloss_dp0 = t_proj_bkwd2_p(dloss_dx, layer_params[0], x)
+    dloss_dp1 = dloss_dx.view((-1, outdim)).sum(dim=0)
 
-    jac1 = t_proj_bkwd_p(layer_params[0], x)
-    jac2 = torch.eye(outdim, device=x.device).expand(x.shape[:-1] + (outdim, outdim))
-        
-    return _vjp_in_2d(dloss_dx, jac1), _vjp_in_2d(dloss_dx, jac2)
+    return dloss_dp0, dloss_dp1
 
 def t_linear_bkwd_x(layer_params, x): # input: N x D
     return t_proj_bkwd_x(layer_params[0], x)
 
 def t_linear_bkwd2_x(dloss_dx, layer_params, x): # input: N x D
-    # TODO XXX: call t_proj_bkwd2_x instead
-    return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params[0], x))
+    return t_proj_bkwd2_x(dloss_dx, layer_params[0], x)
 
 def t_proj_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params, -2, -1)) # since layer_params is ... x output_dim x emb_dim
@@ -170,7 +182,14 @@ def my_t_proj_bkwd_p(layer_params, x): # input: seq_len x emb_dim
     return (jac*aux).reshape(outdims + layer_params.shape)
 
 def t_proj_bkwd2_p(dloss_dx, layer_params, x): # input: N x D
-    return _vjp_in_2d(dloss_dx, t_proj_bkwd_p(layer_params, x))
+    # Note that using vjp instead of jacrev results in notiecable difference
+    # in results, in particular dloss_dp[0][0] for the whole GPT2 is affected
+    # TODO XXX XXX: Investigate why this is happening
+    # (It's possible we don't need to do it if we write our own rowise jacobian for bmms)
+    (res, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
+    return vjpfunc(dloss_dx)[0]
+    #return _vjp_in_2d(dloss_dx, t_proj_bkwd_p(layer_params, x))
+
 
 # TODO XXX: Placebolder. Code up Jacobian for bmm
 def t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
@@ -193,7 +212,10 @@ def my_t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
     return (jac*aux).reshape(outdims + indims)
 
 def t_proj_bkwd2_x(dloss_dx, layer_params, x):
-    return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params, x))
+    # TODO XXX XXX: check whether it affects numerical values as t_proj_bkwd2_p does or not
+    (_, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
+    return vjpfunc(dloss_dx)[1]
+    #return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params, x))
 
 def t_softmax_attn_fwd(q, k, mask, train, p_gen_aux=None):
     D = q.shape[-1]
@@ -241,14 +263,17 @@ def t_softmax_attn_bkwd2(dloss_dx, q, k, mask, train, p_gen_aux=None):
     # TODO XXX: code up jacobian for this bmm
     from torch.func import jacrev
     qk_t_bmm_fn = lambda q, k: torch.matmul(q, k.transpose(-2, -1))/math.sqrt(D)
-    bmm_jac_k = jacrev(qk_t_bmm_fn, argnums=(1))(q, k)
+    # TODO XXX XXX: Investigate why the numerical differences between jacrev and vjp
+    #bmm_jac_k = jacrev(qk_t_bmm_fn, argnums=(1))(q, k)
+    (_, vjpfunc) = torch.func.vjp(qk_t_bmm_fn, q, k)
     #print(f'q/math.sqrt(D)', q/math.sqrt(D), '\nbmm_jac_k', bmm_jac_k) # the same values..
     # And: bmm_jac_q would have the same values as k/math.sqrt(D) (that fact is used below) 
     
     dloss_dx = t_log_softmax_bkwd2(dloss_dx, attn)
     dloss_dx = torch.where(torch.unsqueeze(mask,dim=1), dloss_dx, 0)
     dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
-    dloss_dk = _vjp_in_2d(dloss_dx, bmm_jac_k)
+    #dloss_dk = _vjp_in_2d(dloss_dx, bmm_jac_k)
+    dloss_dk = vjpfunc(dloss_dx)[1] # note, this also computes [0]...
     
     return dloss_dq, dloss_dk
 
@@ -282,8 +307,11 @@ def t_scaled_dot_prod_attn_bkwd2(dloss_dx, qkv, mask, train=True, p_gen_aux=None
     # TODO XXX: code up jacobian for bmm
     from torch.func import jacrev
     bbm_fn = lambda m1, m2: torch.matmul(m1, m2)
-    jac_bmm_sa, jac_v = jacrev(bbm_fn, argnums=(0,1))(sa, v)
-    dloss_dsa, dloss_dv = _vjps_in_2d(dloss_dx, [jac_bmm_sa, jac_v])
+    # TODO XXX XXX: Investigate why the numerical differences between jacrev and vjp
+    # jac_bmm_sa, jac_v = jacrev(bbm_fn, argnums=(0,1))(sa, v)
+    # dloss_dsa, dloss_dv = _vjps_in_2d(dloss_dx, [jac_bmm_sa, jac_v])
+    (_, vjpfunc) = torch.func.vjp(bbm_fn, sa, v)
+    dloss_dsa, dloss_dv = vjpfunc(dloss_dx)
     dloss_dq, dloss_dk = t_softmax_attn_bkwd2(dloss_dsa, q, k, mask, train, p_gen_aux)
     
     return dloss_dq, dloss_dk, dloss_dv
@@ -566,9 +594,13 @@ def t_dropout_bkwd(x, train=True, p_gen_aux=None):
     return eyed_jac * mask
 
 def t_dropout_bkwd2(dloss_dx, x, train=True, p_gen_aux=None):
-    jac_dropout = t_dropout_bkwd(x, train, p_gen_aux)
-    
-    return _vjp_in_2d(dloss_dx, jac_dropout)
+    if not train: # we will never use this jacobian..
+        return dloss_dx * (1-DROPOUT_RATE)
+
+    assert p_gen_aux is not None
+    generator = torch.Generator(device=x.device).manual_seed(p_gen_aux)
+    mask = torch.bernoulli(torch.full_like(x, 1-DROPOUT_RATE), generator=generator) 
+    return dloss_dx * mask
 
 def t_layernorm_fwd(layer_params, x):
     x_mean = torch.mean(x, axis=-1, keepdims=True)
@@ -604,6 +636,15 @@ def t_layernorm_bkwd2_p(dloss_dx, layer_params, x):
     return _vjp_in_2d(dloss_dx, jac1 *jac1_aux), _vjp_in_2d(dloss_dx, jac2)
 
 def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
+    BS = x.shape[0]
+    N = x.shape[-1]
+    
+    jac = normalized_x_bkwd_rowwise(x)
+    jac = torch.block_diag(*jac.unbind(0)).reshape(BS, N, BS, N)
+    return jac
+
+def normalized_x_bkwd_rowwise(x): # d [(x-x_mean)/x_std] / dx
+    # f(x) = x - x_mean, g(x) = x_std
     # Note, below is "shorten Jacobian": rows are independent, so zeros in result are skipped.
     def std_bkwd(x):
         N = x.shape[-1]
@@ -611,18 +652,45 @@ def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
         x_std = torch.std(x, axis=-1, keepdims = True)
         return 1 / (x_std * (N-1)) * (x - x_mean)
 
-    BS = x.shape[0]
-    N = x.shape[-1]
+    BS, N = x.shape
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims = True)
      
-    x_eye = torch.eye(N, device=x.device).expand(x.shape[0], N, N)
-    fdx_g = (x_eye - 1/N) *x_std.unsqueeze(-1)
-    f_gdx = torch.matmul((x-x_mean).unsqueeze(-1), std_bkwd(x).unsqueeze(-2)) 
-    g_pow2 = 1/torch.pow(x_std, 2)
+    x_eye = torch.eye(N, device=x.device).expand(BS, N, N)
+    jac = (x_eye - 1/N) *x_std.unsqueeze(-1) # fdx_g
+    jac.sub_(torch.matmul((x-x_mean).unsqueeze(-1), std_bkwd(x).unsqueeze(-2))) # - f_gdx
+    jac.mul_(1/torch.pow(x_std, 2).unsqueeze(-1)) # * g_pow2
+    return jac
 
-    jac = g_pow2.unsqueeze(-1) * (fdx_g  - f_gdx)
-    return torch.block_diag(*jac.unbind(0)).reshape(BS, N, BS, N)
+# Note that there is one semantic difference between this 
+# and normalized_x_bkwd_rowwise (beside vjp):
+# normalized_x_bkwd_rowwise returns jacobian which needs to be transposed.
+def normalized_x_bkwd2(dloss_dx, x): # d [(x-x_mean)/x_std] / dx
+    # f(x) = x - x_mean, g(x) = x_std
+    BS, N = x.shape
+    x_mean = torch.mean(x, axis=-1, keepdims=True)
+    x_rstd = 1/torch.std(x, axis=-1, keepdims = True)
+    x_norm = (x - x_mean) * x_rstd
+    
+    x_eye = torch.eye(N, device=x.device).expand(BS, N, N)
+    f_gdx =  torch.matmul(x_norm.unsqueeze(-1), x_norm.unsqueeze(-2)/(N-1)) 
+    jac = (x_eye - 1/N - f_gdx) *x_rstd.unsqueeze(-1)
+    
+    return _vjp_in_2d_rowise(dloss_dx, jac.transpose(-2,-1)) 
+
+# TODO XXX XXX: investigate why this is more memory efficient than my implementation above
+# (Inspired from llm.c)
+def normalized_x_bkwd2_plus(dloss_dx, x): # d [(x-x_mean)/x_std] / dx
+    # f(x) = x - x_mean, g(x) = x_std
+    BS, N = x.shape
+    x_mean = torch.mean(x, axis=-1, keepdims=True)
+    x_rstd = 1/torch.std(x, axis=-1, keepdims = True)
+    x_norm = (x - x_mean) * x_rstd
+    
+    n_adj = N/(N-1)
+    dloss_dx = dloss_dx - dloss_dx.mean(-1, keepdim=True) - x_norm * (dloss_dx * x_norm).mean(-1, keepdim=True) * n_adj
+    dloss_dx *= x_rstd
+    return dloss_dx
 
 def t_layernorm_bkwd_x(layer_params, x):
     x_2d = x.reshape((-1, x.shape[-1]))
@@ -631,10 +699,10 @@ def t_layernorm_bkwd_x(layer_params, x):
 
 def t_layernorm_bkwd2_x(dloss_dx, layer_params, x):
     x_2d = x.reshape((-1, x.shape[-1]))
-    jac_x_2d = (layer_params[0] * normalized_x_bkwd(x_2d)).transpose(-3,-1)
-    jac = jac_x_2d.reshape(x.shape + x.shape)
-    
-    return _vjp_in_2d(dloss_dx, jac)
+    # TODO XXX XXX: investigate the difference in memory consumption between two
+    #return normalized_x_bkwd2(dloss_dx * layer_params[0], x_2d)
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    return normalized_x_bkwd2_plus(dloss_dx_2d * layer_params[0], x_2d).reshape(dloss_dx.shape)
     
 def t_gpt2_tlayer_sublock1_fwd(layer_params, y, mask, train=True, p_gen_aux=None):
     if not train:
@@ -739,8 +807,7 @@ def t_gpt2_tlayer_sublock1_bkwd2(dloss_dx, layer_params, y, mask, train=True, p_
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y_in)
     dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y_in)
     # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
-    jac_y = torch.eye(y.numel(), device=y.device).reshape(blck_dloss_dx.shape + blck_dloss_dx.shape)
-    dloss_dx = _vjp_in_2d(blck_dloss_dx, jac_y) + dloss_dx
+    dloss_dx = blck_dloss_dx + dloss_dx
     dloss_dp = layernorm_dloss_dp + tlayer_attn_dloss_dp
     
     return dloss_dx, dloss_dp
@@ -828,8 +895,7 @@ def t_gpt2_tlayer_sublock2_bkwd2(dloss_dx, layer_params, y, train=True, p_gen_au
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y_in)
     dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y_in)
     # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
-    jac_y = torch.eye(y.numel(), device=y.device).reshape(blck_dloss_dx.shape +blck_dloss_dx.shape)    
-    dloss_dx = _vjp_in_2d(blck_dloss_dx, jac_y) + dloss_dx
+    dloss_dx = blck_dloss_dx + dloss_dx
     dloss_dp = layernorm_dloss_dp + tlayer_ffn_dloss_dp
     
     return dloss_dx, dloss_dp
@@ -976,8 +1042,7 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     y_in = y
     indices = torch.arange(y.shape[1], device=y.device).unsqueeze(0).expand(*y.shape) # we ignore indices arg
     y = t_embed_fwd(params[0], y)
-    # TODO: move the below line, and start using t_dropout_bkwd2
-    jac_dropout = t_dropout_bkwd(y + params[1][0], train, p_gen_aux[0])
+    t_dropout_input = y + params[1][0]
     y = t_dropout_fwd(y + params[1][0], train, p_gen_aux[0])
     
     layers_inputs = []
@@ -1005,21 +1070,14 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     layers_dloss_dp = list(reversed(layers_dloss_dp)) # TODO XXX: clean up list+ reversed combos
     
     # dropout + embed + pos_enc
-    dloss_dx = _vjp_in_2d(dloss_dx, jac_dropout)
-    
+    dloss_dx = t_dropout_bkwd2(dloss_dx, t_dropout_input, train, p_gen_aux[0])
     embed_dloss_dp = t_embed_bkwd2(dloss_dx, params[0], y_in)
     # Due to tying of embedding and final projection layers,
     # we need to fill zeroed gradient with respect to biases:
     embed_dloss_dp = [embed_dloss_dp[0], torch.zeros(embed_dloss_dp[0].shape[:-1], device=y_in.device)]
-    
-    # TODO XXX: code up bkwd2 for pos_enc, so we don't reuse t_embed_bkwd
-    # Reuse t_embed_bkwd to compute jacobian of pos_encoding
-    # Need to account for lack of  1/ sqrt(emb_dim)
-    jac_pos_enc = list(t_embed_bkwd(params[1], indices))
-    jac_pos_enc[0][jac_pos_enc[0]!=0] = 1
-    jac_pos_enc[0] =_vjp_in_2d(dloss_dx, jac_pos_enc[0])
+    pos_enc_dloss_dp = t_indexing_bkwd2(dloss_dx, params[1], indices)
 
-    dloss_dp = [embed_dloss_dp, jac_pos_enc] + layers_dloss_dp + [layernorm_dloss_dp]
+    dloss_dp = [embed_dloss_dp, pos_enc_dloss_dp] + layers_dloss_dp + [layernorm_dloss_dp]
     return tuple(dloss_dp)
 
 def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
