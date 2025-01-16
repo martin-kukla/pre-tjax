@@ -15,17 +15,13 @@ import torch
 
 ### PARAMS: they are the same as for Torch.Func, so import
 
-from model_torch_func import init_transformer_gpt2, count_num_params, batched_forward_gpt2
+from model_torch_func import init_transformer_gpt2, count_num_params
 
 ### MODEL in TRITON
 
 def t_log_softmax_fwd(x_logits): # compute log_softmax from logits over the last dimension
     x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0] # as it returns (maxs, indices)
     return x_logits - torch.logsumexp(x_logits, axis=-1, keepdims=True)
-
-# Other module assumes different name
-# TODO XXX: fix references in other file
-log_softmax = t_log_softmax_fwd 
 
 def t_log_softmax_bkwd(x_logits):
     indims = x_logits.shape
@@ -1123,6 +1119,4 @@ def t_gpt2_bkwd2_p(dloss_dx, params, y, y_mask, y_indices, train, p_gen_aux=None
         
     return tuple(dloss_dp)
 
-
-#t_batched_forward_gpt2 = torch.vmap(t_forward_gpt2, in_dims=(None, 0, 0, 0, None), randomness="different") # TODO XXX: output will be batched unlike JAX's vmap
-t_batched_forward_gpt2 = t_gpt2_forward # TODO XXX: rename the left one too
+t_batched_forward_gpt2 = t_gpt2_forward # TODO XXX: replace the references to the left with the right

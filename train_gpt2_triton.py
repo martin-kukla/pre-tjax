@@ -71,7 +71,8 @@ print(weight_decay_mask)
 ### Tests (forward pass + memory) TODO XXX: Remove
 ###############################################
 # Testing forward pass for triton
-from model_triton import batched_forward_gpt2, t_batched_forward_gpt2
+from model_torch_func import batched_forward_gpt2
+from model_triton import t_batched_forward_gpt2
 _, y, _, y_mask, _, _, y_indices = next(get_batched_examples_packed(ds, 8, seq_len, START_TOK, END_TOK, pack_frac=0.75, skip_n_rows = 0))
 y = torch.tensor(y, dtype=torch.int32, device="cuda")
 y_mask = torch.tensor(y_mask, dtype=torch.bool, device="cuda")
@@ -80,8 +81,6 @@ train=False # TODO: play with
 y_in = y[:, :-1]
 logits_torch_logits = batched_forward_gpt2(params, y_in, y_mask, y_indices, train) 
 logits_triton = t_batched_forward_gpt2(params, y_in, y_mask, y_indices, train) 
-#print(logits_torch_logits[0][0])
-#print(logits_triton[0][0])
 assert torch.all(logits_torch_logits == logits_triton)
 
 # # Testing Memory Usage. I decided not to get too deep into it, since this uses torch.grad + torch.compile..
