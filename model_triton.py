@@ -1,4 +1,11 @@
-# WORK IN PROGRESS: writing derivatives right now
+# WORK IN PROGRESS: currently, coding up Triton kernals
+
+# Convention for function names:
+# *_fwd: forward pass
+# *_bkwd_p: backward pass which computes Jacobian with respect to parameters
+# *_bkwd_x: backward pass which computes Jacobian with respect to input
+# *_bkwd2: backward pass which computes VJPs with respect to input and parameters
+# (all backward passes are writen from first principle with exception of bkwd for BMM - TODO)
 
 ### PARAMS + MODEL
 DROPOUT_RATE = 0.1 # TODO: move it out, and pass as paramteter
