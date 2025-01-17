@@ -423,6 +423,12 @@ def t_tlayer_attn_fwd(layer_params, qkv, mask, train, p_gen_aux=None): # input: 
     attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
     return t_proj_fwd(layer_params[-1], attn)
 
+def t_tlayer_attn_fwd3(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
+    heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train, p_gen_aux)
+    BS, H, N, D = heads_attns.shape
+    attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
+    return t_proj_fwd(layer_params[-1], attn), [heads_attns]
+
 def t_tlayer_attn_bkwd_p(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
     jac_heads_attns_p = t_tlayer_attn_heads_bkwd_p(layer_params[0], qkv, mask, train, p_gen_aux)
     heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train, p_gen_aux)
@@ -473,6 +479,19 @@ def t_tlayer_attn_bkwd2_x(dloss_dx, layer_params, qkv, mask, train, p_gen_aux=No
 
 def t_tlayer_attn_bkwd2(dloss_dx, layer_params, qkv, mask, train, p_gen_aux=None): # input: BS x N x D
     heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train, p_gen_aux)
+    BS, H, N, D = heads_attns.shape
+    attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
+    
+    # propagate back
+    proj_dloss_dp = t_proj_bkwd2_p(dloss_dx, layer_params[-1], attn)
+    dloss_dx = t_proj_bkwd2_x(dloss_dx, layer_params[-1], attn)
+    dloss_dx = dloss_dx.reshape(BS, N, H, D).transpose(1, 2) # unflatten H+D, then swap back H and N
+    dloss_dx, heads_attns_dloss_dp = t_tlayer_attn_heads_bkwd2(dloss_dx, layer_params[0], qkv, mask, train, p_gen_aux)
+    
+    return dloss_dx, (heads_attns_dloss_dp, proj_dloss_dp)
+
+def t_tlayer_attn_bkwd3(dloss_dx, acts, layer_params, qkv, mask, train, p_gen_aux=None): # input: BS x N x D
+    heads_attns = acts[0]
     BS, H, N, D = heads_attns.shape
     attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
     
@@ -723,8 +742,8 @@ def t_gpt2_tlayer_sublock1_fwd3(layer_params, y, mask, train=True, p_gen_aux=Non
         
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     acts = [y_diff]
-    y_diff = t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
-    acts.append(y_diff)
+    y_diff, y_diff_acts = t_tlayer_attn_fwd3(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    acts.append((y_diff, y_diff_acts))
     y = y + t_dropout_fwd(y_diff, train, p_gen_aux[1])
     return y, acts
 
@@ -834,11 +853,11 @@ def t_gpt2_tlayer_sublock1_bkwd3(dloss_dx, acts, layer_params, y, mask, train=Tr
         
     blck_dloss_dx = dloss_dx
     y_diff = acts[0]
-    y_diff_attn = acts[1]
+    y_diff_attn = acts[1][0]
 
     # propagate back
     dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_attn, train, p_gen_aux[1])
-    dloss_dx, tlayer_attn_dloss_dp = t_tlayer_attn_bkwd2(dloss_dx, layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    dloss_dx, tlayer_attn_dloss_dp = t_tlayer_attn_bkwd3(dloss_dx, acts[1][1], layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
     dloss_dx = torch.stack(dloss_dx).sum(dim=0)
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y)
     dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y)
