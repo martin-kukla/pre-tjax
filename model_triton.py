@@ -914,6 +914,14 @@ def t_gpt2_tlayer_sublock2_fwd(layer_params, y, train=True, p_gen_aux=None):
     y = y + t_dropout_fwd(t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu_fwd), train, p_gen_aux)
     return y
 
+def t_gpt2_tlayer_sublock2_fwd3(layer_params, y, train=True, p_gen_aux=None):
+    y_diff = t_layernorm_fwd(layer_params[:-4], y)
+    acts = [y_diff]
+    y_diff = t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu_fwd)
+    acts.append(y_diff)
+    y = y + t_dropout_fwd(y_diff, train, p_gen_aux)
+    return y, acts
+
 def t_gpt2_tlayer_sublock2_bkwd_p(layer_params, y, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     jac_layernorm_p = t_layernorm_bkwd_p(layer_params[:2], y)
@@ -997,6 +1005,23 @@ def t_gpt2_tlayer_sublock2_bkwd2(dloss_dx, layer_params, y, train=True, p_gen_au
     
     return dloss_dx, dloss_dp
 
+def t_gpt2_tlayer_sublock2_bkwd3(dloss_dx, acts, layer_params, y, train=True, p_gen_aux=None): # input: N x D
+    blck_dloss_dx = dloss_dx
+    
+    y_diff = acts[0]
+    y_diff_ffn = acts[1]
+    
+    # propagate back
+    dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_ffn, train, p_gen_aux)
+    dloss_dx, tlayer_ffn_dloss_dp = t_tlayer_ffn_bkwd2(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
+    layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y)
+    dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y)
+    # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
+    dloss_dx = blck_dloss_dx + dloss_dx
+    dloss_dp = layernorm_dloss_dp + tlayer_ffn_dloss_dp
+    
+    return dloss_dx, dloss_dp
+
 def t_gpt2_tlayer_fwd(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
     if not train:
         p_gen_aux = [None, None, None] 
@@ -1012,8 +1037,8 @@ def t_gpt2_tlayer_fwd3(layer_params, y, mask, train=True, p_gen_aux=None): # inp
     y, sblck1_acts = t_gpt2_tlayer_sublock1_fwd3(layer_params[:-6], y, mask, train, p_gen_aux[:2])
     acts = [sblck1_acts] # TODO XXX: should the element be a (None, sblck1_acts) tuple to keep consistent?
     sblck2_y = y
-    y = t_gpt2_tlayer_sublock2_fwd(layer_params[-6:], y, train, p_gen_aux[2])
-    acts.append((sblck2_y, None))
+    y, sblck2_acts = t_gpt2_tlayer_sublock2_fwd3(layer_params[-6:], y, train, p_gen_aux[2])
+    acts.append((sblck2_y, sblck2_acts))
     return y, acts
 
 def t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
@@ -1076,7 +1101,7 @@ def t_gpt2_tlayer_bkwd3(dloss_dx, acts, layer_params, y, mask, train=True, p_gen
     if not train:
         p_gen_aux = [None, None, None]    
     
-    dloss_dx, subblock2_dloss_dp = t_gpt2_tlayer_sublock2_bkwd2(dloss_dx, layer_params[-6:], acts[-1][0], train, p_gen_aux[2])
+    dloss_dx, subblock2_dloss_dp = t_gpt2_tlayer_sublock2_bkwd3(dloss_dx, acts[-1][1], layer_params[-6:], acts[-1][0], train, p_gen_aux[2])
     dloss_dx, subblock1_dloss_dp = t_gpt2_tlayer_sublock1_bkwd3(dloss_dx, acts[-2], layer_params[:-6], y, mask, train, p_gen_aux[:2])
     dloss_dp = subblock1_dloss_dp + subblock2_dloss_dp
     
