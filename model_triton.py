@@ -1089,6 +1089,13 @@ def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input
     y = t_linear_fwd(params[0], y) 
     return y
 
+def t_gpt2_forward_with_acts(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
+    y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
+    acts = [y]
+    
+    y = t_linear_fwd(params[0], y) 
+    return y, acts
+
 def t_gpt2_bkwd_p(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
     jac = t_gpt2_tlayers_bkwd_p(params, y, y_mask, y_indices, train, p_gen_aux)
     y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
@@ -1112,6 +1119,18 @@ def t_gpt2_bkwd2_p(dloss_dx, params, y, y_mask, y_indices, train, p_gen_aux=None
     dloss_dx = t_linear_bkwd2_x(dloss_dx, params[0], y)
     
     dloss_dp = t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y0, y_mask, y_indices, train, p_gen_aux)    
+    dloss_dp = list(dloss_dp)
+    
+    # As we tie embedding and last projection weights (no need to add jac[0][1] as it's zeroed)
+    dloss_dp[0] = (dloss_dp[0][0] + linear_dloss_dp[0], linear_dloss_dp[1])
+        
+    return tuple(dloss_dp)
+
+def t_gpt2_bkwd3_p(dloss_dx, acts, params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
+    linear_dloss_dp = t_linear_bkwd2_p(dloss_dx, params[0], acts[-1])    
+    dloss_dx = t_linear_bkwd2_x(dloss_dx, params[0], acts[-1])
+    
+    dloss_dp = t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, y_mask, y_indices, train, p_gen_aux)    
     dloss_dp = list(dloss_dp)
     
     # As we tie embedding and last projection weights (no need to add jac[0][1] as it's zeroed)
