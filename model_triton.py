@@ -981,6 +981,24 @@ def t_gpt2_tlayers_fwd(params, y, mask, indices, train=True, p_gen_aux=None): # 
 
     return y
 
+def t_gpt2_tlayers_fwd3(params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
+    if not train: # as there are 3 dropouts per tlayer
+        p_gen_aux = [None] + [None] * 3 * (len(params) - 3)
+    
+    y = t_embed_fwd(params[0], y)
+    y = y + params[1][0]
+    acts = [y]
+    y = t_dropout_fwd(y, train, p_gen_aux[0])
+    
+    for i, layer_params in enumerate(params[2:-1]):
+        layer_p_gen_aux = p_gen_aux[1+i*3:1+(i+1)*3]
+        acts.append((y,layer_p_gen_aux))
+        y = t_gpt2_tlayer_fwd(layer_params, y, mask, train, layer_p_gen_aux)
+    acts.append(y)
+    y = t_layernorm_fwd(params[-1], y)
+
+    return y, acts
+
 # Multiplies (in 2D) left Jacobian against the nested list of right Jacobians
 # Uses y for doing reshapes to 2D correctly, but probably one doesn't need it
 # TODO XXX: func should support PyTree at right
@@ -1083,6 +1101,43 @@ def t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, mask, indices, train=True, p_gen
     dloss_dp = [embed_dloss_dp, pos_enc_dloss_dp] + layers_dloss_dp + [layernorm_dloss_dp]
     return tuple(dloss_dp)
 
+def t_gpt2_tlayers_bkwd3_p(dloss_dx, acts, params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
+    if not train: # as there are 3 dropouts per tlayer
+        p_gen_aux = [None] + [None] * 3 * (len(params) - 3)    
+    
+    indices = torch.arange(y.shape[1], device=y.device).unsqueeze(0).expand(*y.shape) # we ignore indices arg
+    t_dropout_input = acts[0]
+    layers_inputs = acts[1:-1]
+    
+    # Propoagate back    
+    # layernorm
+    layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, params[-1], acts[-1])
+    dloss_dx = t_layernorm_bkwd2_x(dloss_dx, params[-1], acts[-1]) 
+    
+    # layers
+    layers_dloss_dp = []
+    for i, layer_params in reversed(list(enumerate(params[2:-1]))):
+        layer_y, layer_p_gen_aux = layers_inputs[i]
+        # Use bkwd2 which combines dloss_dx and dloss_dp computations (for efficiency reasons)
+        # TODO XXX: do sanity check whether the results are exactly the same as for separate
+        # bkwd2_p and bkwd2_x
+        dloss_dx, layer_dloss_dp = t_gpt2_tlayer_bkwd2(dloss_dx, layer_params, layer_y, mask, train, layer_p_gen_aux)
+        layers_dloss_dp.append(layer_dloss_dp)
+        #layers_dloss_dp.append(t_gpt2_tlayer_bkwd2_p(dloss_dx, layer_params, layer_y, mask, train, layer_p_gen_aux))
+        #dloss_dx = t_gpt2_tlayer_bkwd2_x(dloss_dx, layer_params, layer_y, mask, train, layer_p_gen_aux)
+    layers_dloss_dp = list(reversed(layers_dloss_dp)) # TODO XXX: clean up list+ reversed combos
+    
+    # dropout + embed + pos_enc
+    dloss_dx = t_dropout_bkwd2(dloss_dx, t_dropout_input, train, p_gen_aux[0])
+    embed_dloss_dp = t_embed_bkwd2(dloss_dx, params[0], y)
+    # Due to tying of embedding and final projection layers,
+    # we need to fill zeroed gradient with respect to biases:
+    embed_dloss_dp = [embed_dloss_dp[0], torch.zeros(embed_dloss_dp[0].shape[:-1], device=y.device)]
+    pos_enc_dloss_dp = t_indexing_bkwd2(dloss_dx, params[1], indices)
+
+    dloss_dp = [embed_dloss_dp, pos_enc_dloss_dp] + layers_dloss_dp + [layernorm_dloss_dp]
+    return tuple(dloss_dp)
+
 def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
     y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
     
@@ -1090,8 +1145,8 @@ def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input
     return y
 
 def t_gpt2_forward_with_acts(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
-    y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
-    acts = [y]
+    y, acts = t_gpt2_tlayers_fwd3(params, y, y_mask, y_indices, train, p_gen_aux)
+    acts.append(y)
     
     y = t_linear_fwd(params[0], y) 
     return y, acts
@@ -1130,7 +1185,7 @@ def t_gpt2_bkwd3_p(dloss_dx, acts, params, y, y_mask, y_indices, train, p_gen_au
     linear_dloss_dp = t_linear_bkwd2_p(dloss_dx, params[0], acts[-1])    
     dloss_dx = t_linear_bkwd2_x(dloss_dx, params[0], acts[-1])
     
-    dloss_dp = t_gpt2_tlayers_bkwd2_p(dloss_dx, params, y, y_mask, y_indices, train, p_gen_aux)    
+    dloss_dp = t_gpt2_tlayers_bkwd3_p(dloss_dx, acts[:-1], params, y, y_mask, y_indices, train, p_gen_aux)    
     dloss_dp = list(dloss_dp)
     
     # As we tie embedding and last projection weights (no need to add jac[0][1] as it's zeroed)
