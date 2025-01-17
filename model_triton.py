@@ -911,6 +911,15 @@ def t_gpt2_tlayer_fwd(layer_params, y, mask, train=True, p_gen_aux=None): # inpu
     y = t_gpt2_tlayer_sublock2_fwd(layer_params[-6:], y, train, p_gen_aux[2])
     return y
 
+def t_gpt2_tlayer_fwd3(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
+    if not train:
+        p_gen_aux = [None, None, None] 
+
+    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    acts = [y]
+    y = t_gpt2_tlayer_sublock2_fwd(layer_params[-6:], y, train, p_gen_aux[2])
+    return y, acts
+
 def t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
     if not train:
         p_gen_aux = [None, None, None] 
@@ -967,6 +976,16 @@ def t_gpt2_tlayer_bkwd2(dloss_dx, layer_params, y, mask, train=True, p_gen_aux=N
     
     return dloss_dx, dloss_dp
 
+def t_gpt2_tlayer_bkwd3(dloss_dx, acts, layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
+    if not train:
+        p_gen_aux = [None, None, None]    
+    
+    dloss_dx, subblock2_dloss_dp = t_gpt2_tlayer_sublock2_bkwd2(dloss_dx, layer_params[-6:], acts[0], train, p_gen_aux[2])
+    dloss_dx, subblock1_dloss_dp = t_gpt2_tlayer_sublock1_bkwd2(dloss_dx, layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    dloss_dp = subblock1_dloss_dp + subblock2_dloss_dp
+    
+    return dloss_dx, dloss_dp
+
 def t_gpt2_tlayers_fwd(params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
     if not train: # as there are 3 dropouts per tlayer
         p_gen_aux = [None] + [None] * 3 * (len(params) - 3)
@@ -992,8 +1011,9 @@ def t_gpt2_tlayers_fwd3(params, y, mask, indices, train=True, p_gen_aux=None): #
     
     for i, layer_params in enumerate(params[2:-1]):
         layer_p_gen_aux = p_gen_aux[1+i*3:1+(i+1)*3]
-        acts.append(y)
-        y = t_gpt2_tlayer_fwd(layer_params, y, mask, train, layer_p_gen_aux)
+        layer_input = y
+        y, layer_acts = t_gpt2_tlayer_fwd3(layer_params, y, mask, train, layer_p_gen_aux)
+        acts.append([layer_input]+ layer_acts)
     acts.append(y)
     y = t_layernorm_fwd(params[-1], y)
 
@@ -1118,14 +1138,10 @@ def t_gpt2_tlayers_bkwd3_p(dloss_dx, acts, params, y, mask, indices, train=True,
     # layers
     layers_dloss_dp = []
     for i, layer_params in reversed(list(enumerate(params[2:-1]))):
-        layer_y, layer_p_gen_aux = layers_inputs[i]
-        # Use bkwd2 which combines dloss_dx and dloss_dp computations (for efficiency reasons)
-        # TODO XXX: do sanity check whether the results are exactly the same as for separate
-        # bkwd2_p and bkwd2_x
-        dloss_dx, layer_dloss_dp = t_gpt2_tlayer_bkwd2(dloss_dx, layer_params, layer_y, mask, train, layer_p_gen_aux)
+        layer_acts, layer_p_gen_aux = layers_inputs[i]
+        # TODO XXX: Note in bkwd2, there was a comment to compare bkwd against bkwd2_x, bkwd2_p combined. I think it can be ignored
+        dloss_dx, layer_dloss_dp = t_gpt2_tlayer_bkwd3(dloss_dx, layer_acts[1:], layer_params, layer_acts[0], mask, train, layer_p_gen_aux)
         layers_dloss_dp.append(layer_dloss_dp)
-        #layers_dloss_dp.append(t_gpt2_tlayer_bkwd2_p(dloss_dx, layer_params, layer_y, mask, train, layer_p_gen_aux))
-        #dloss_dx = t_gpt2_tlayer_bkwd2_x(dloss_dx, layer_params, layer_y, mask, train, layer_p_gen_aux)
     layers_dloss_dp = list(reversed(layers_dloss_dp)) # TODO XXX: clean up list+ reversed combos
     
     # dropout + embed + pos_enc
