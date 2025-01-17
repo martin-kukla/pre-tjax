@@ -2,9 +2,11 @@
 
 # Convention for function names:
 # *_fwd: forward pass
+# *_fwd3: forward pass which gathers all activations (for activation checkpointing)
 # *_bkwd_p: backward pass which computes Jacobian with respect to parameters
 # *_bkwd_x: backward pass which computes Jacobian with respect to input
 # *_bkwd2: backward pass which computes VJPs with respect to input and parameters
+# *_bkwd3: backward pass which computes VJPs with respect to input and parameters (+ activation checkpointing)
 # (all backward passes are writen from first principle with exception of bkwd for BMM - TODO)
 
 ### PARAMS + MODEL
@@ -715,6 +717,17 @@ def t_gpt2_tlayer_sublock1_fwd(layer_params, y, mask, train=True, p_gen_aux=None
     y = y + t_dropout_fwd(t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0]), train, p_gen_aux[1])
     return y
 
+def t_gpt2_tlayer_sublock1_fwd3(layer_params, y, mask, train=True, p_gen_aux=None):
+    if not train:
+        p_gen_aux = [None, None]
+        
+    y_diff = t_layernorm_fwd(layer_params[:2], y)
+    acts = [y_diff]
+    y_diff = t_tlayer_attn_fwd(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    acts.append(y_diff)
+    y = y + t_dropout_fwd(y_diff, train, p_gen_aux[1])
+    return y, acts
+
 def t_gpt2_tlayer_sublock1_bkwd_p(layer_params, y, mask, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     if not train:
         p_gen_aux = [None, None]
@@ -809,6 +822,26 @@ def t_gpt2_tlayer_sublock1_bkwd2(dloss_dx, layer_params, y, mask, train=True, p_
     dloss_dx = torch.stack(dloss_dx).sum(dim=0)
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y_in)
     dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y_in)
+    # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
+    dloss_dx = blck_dloss_dx + dloss_dx
+    dloss_dp = layernorm_dloss_dp + tlayer_attn_dloss_dp
+    
+    return dloss_dx, dloss_dp
+
+def t_gpt2_tlayer_sublock1_bkwd3(dloss_dx, acts, layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
+    if not train:
+        p_gen_aux = [None, None]
+        
+    blck_dloss_dx = dloss_dx
+    y_diff = acts[0]
+    y_diff_attn = acts[1]
+
+    # propagate back
+    dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_attn, train, p_gen_aux[1])
+    dloss_dx, tlayer_attn_dloss_dp = t_tlayer_attn_bkwd2(dloss_dx, layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    dloss_dx = torch.stack(dloss_dx).sum(dim=0)
+    layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y)
+    dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y)
     # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
     dloss_dx = blck_dloss_dx + dloss_dx
     dloss_dp = layernorm_dloss_dp + tlayer_attn_dloss_dp
@@ -915,9 +948,11 @@ def t_gpt2_tlayer_fwd3(layer_params, y, mask, train=True, p_gen_aux=None): # inp
     if not train:
         p_gen_aux = [None, None, None] 
 
-    y = t_gpt2_tlayer_sublock1_fwd(layer_params[:-6], y, mask, train, p_gen_aux[:2])
-    acts = [y]
+    y, sblck1_acts = t_gpt2_tlayer_sublock1_fwd3(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    acts = [sblck1_acts] # TODO XXX: should the element be a (None, sblck1_acts) tuple to keep consistent?
+    sblck2_y = y
     y = t_gpt2_tlayer_sublock2_fwd(layer_params[-6:], y, train, p_gen_aux[2])
+    acts.append((sblck2_y, None))
     return y, acts
 
 def t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
@@ -980,8 +1015,8 @@ def t_gpt2_tlayer_bkwd3(dloss_dx, acts, layer_params, y, mask, train=True, p_gen
     if not train:
         p_gen_aux = [None, None, None]    
     
-    dloss_dx, subblock2_dloss_dp = t_gpt2_tlayer_sublock2_bkwd2(dloss_dx, layer_params[-6:], acts[0], train, p_gen_aux[2])
-    dloss_dx, subblock1_dloss_dp = t_gpt2_tlayer_sublock1_bkwd2(dloss_dx, layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    dloss_dx, subblock2_dloss_dp = t_gpt2_tlayer_sublock2_bkwd2(dloss_dx, layer_params[-6:], acts[-1][0], train, p_gen_aux[2])
+    dloss_dx, subblock1_dloss_dp = t_gpt2_tlayer_sublock1_bkwd3(dloss_dx, acts[-2], layer_params[:-6], y, mask, train, p_gen_aux[:2])
     dloss_dp = subblock1_dloss_dp + subblock2_dloss_dp
     
     return dloss_dx, dloss_dp
@@ -1013,7 +1048,7 @@ def t_gpt2_tlayers_fwd3(params, y, mask, indices, train=True, p_gen_aux=None): #
         layer_p_gen_aux = p_gen_aux[1+i*3:1+(i+1)*3]
         layer_input = y
         y, layer_acts = t_gpt2_tlayer_fwd3(layer_params, y, mask, train, layer_p_gen_aux)
-        acts.append([layer_input]+ layer_acts)
+        acts.append([layer_input, layer_acts])
     acts.append(y)
     y = t_layernorm_fwd(params[-1], y)
 
@@ -1140,7 +1175,7 @@ def t_gpt2_tlayers_bkwd3_p(dloss_dx, acts, params, y, mask, indices, train=True,
     for i, layer_params in reversed(list(enumerate(params[2:-1]))):
         layer_acts, layer_p_gen_aux = layers_inputs[i]
         # TODO XXX: Note in bkwd2, there was a comment to compare bkwd against bkwd2_x, bkwd2_p combined. I think it can be ignored
-        dloss_dx, layer_dloss_dp = t_gpt2_tlayer_bkwd3(dloss_dx, layer_acts[1:], layer_params, layer_acts[0], mask, train, layer_p_gen_aux)
+        dloss_dx, layer_dloss_dp = t_gpt2_tlayer_bkwd3(dloss_dx, layer_acts[1], layer_params, layer_acts[0], mask, train, layer_p_gen_aux)
         layers_dloss_dp.append(layer_dloss_dp)
     layers_dloss_dp = list(reversed(layers_dloss_dp)) # TODO XXX: clean up list+ reversed combos
     
