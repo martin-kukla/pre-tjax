@@ -992,7 +992,7 @@ def t_gpt2_tlayers_fwd3(params, y, mask, indices, train=True, p_gen_aux=None): #
     
     for i, layer_params in enumerate(params[2:-1]):
         layer_p_gen_aux = p_gen_aux[1+i*3:1+(i+1)*3]
-        acts.append((y,layer_p_gen_aux))
+        acts.append(y)
         y = t_gpt2_tlayer_fwd(layer_params, y, mask, train, layer_p_gen_aux)
     acts.append(y)
     y = t_layernorm_fwd(params[-1], y)
@@ -1107,7 +1107,8 @@ def t_gpt2_tlayers_bkwd3_p(dloss_dx, acts, params, y, mask, indices, train=True,
     
     indices = torch.arange(y.shape[1], device=y.device).unsqueeze(0).expand(*y.shape) # we ignore indices arg
     t_dropout_input = acts[0]
-    layers_inputs = acts[1:-1]
+    layers_p_gen_aux = [p_gen_aux[1+i*3:1+(i+1)*3] for i in range(len(params) - 3)]
+    layers_inputs = list(zip(acts[1:-1], layers_p_gen_aux))
     
     # Propoagate back    
     # layernorm
