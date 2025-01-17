@@ -551,6 +551,13 @@ def t_tlayer_ffn_fwd(layer_params, x, activation_fn): # input: seq_len x emb_dim
     x = t_linear_fwd((layer_params[2], layer_params[3]), x)
     return x
 
+def t_tlayer_ffn_fwd3(layer_params, x, activation_fn): # input: seq_len x emb_dim
+    x = t_linear_fwd((layer_params[0], layer_params[1]), x)
+    acts = [x]
+    x = activation_fn(x)
+    x = t_linear_fwd((layer_params[2], layer_params[3]), x)
+    return x, acts
+
 def t_tlayer_ffn_bkwd_p(layer_params, x, activation_fn):
     x_2d = x.reshape((-1, x.shape[-1]))
     
@@ -626,6 +633,26 @@ def t_tlayer_ffn_bkwd2(dloss_dx, layer_params, x, activation_fn):
     
     x_2d_in0 = x_2d
     x_2d = t_linear_fwd((layer_params[0], layer_params[1]), x_2d)
+    x_2d_in1 = x_2d
+    x_2d = activation_fn(x_2d)
+    
+    # propagate back
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    ffn2_dloss_dp = t_linear_bkwd2_p(dloss_dx_2d, (layer_params[2], layer_params[3]), x_2d)
+    dloss_dx_2d = t_linear_bkwd2_x(dloss_dx_2d, (layer_params[2], layer_params[3]), x_2d)
+    dloss_dx_2d = act_fn_bkwd2(dloss_dx_2d, x_2d_in1)
+    ffn1_dloss_dp = t_linear_bkwd2_p(dloss_dx_2d, (layer_params[0], layer_params[1]), x_2d_in0)
+    dloss_dx_2d = t_linear_bkwd2_x(dloss_dx_2d, (layer_params[0], layer_params[1]), x_2d_in0)
+
+    return dloss_dx_2d.reshape(x.shape), tuple(ffn1_dloss_dp+ffn2_dloss_dp)
+
+def t_tlayer_ffn_bkwd3(dloss_dx, acts, layer_params, x, activation_fn):
+    x_2d = x.reshape((-1, x.shape[-1]))
+    # note, t_relu_bkwd2 is not implemented yet
+    act_fn_bkwd2 = t_gelu_bkwd2 if activation_fn==t_gelu_fwd else t_relu_bkwd2 
+    
+    x_2d_in0 = x_2d
+    x_2d = acts[0].reshape((-1, acts[0].shape[-1]))  # TODO XXX XXX: align shapes of fwd and bkwd's fwd (perf sufers)
     x_2d_in1 = x_2d
     x_2d = activation_fn(x_2d)
     
@@ -919,6 +946,8 @@ def t_gpt2_tlayer_sublock2_fwd3(layer_params, y, train=True, p_gen_aux=None):
     acts = [y_diff]
     y_diff = t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu_fwd)
     acts.append(y_diff)
+    #y_diff, ffn_acts = t_tlayer_ffn_fwd3(layer_params[-4:], y_diff, t_gelu_fwd)
+    #acts.append((y_diff, ffn_acts))
     y = y + t_dropout_fwd(y_diff, train, p_gen_aux)
     return y, acts
 
@@ -1010,10 +1039,12 @@ def t_gpt2_tlayer_sublock2_bkwd3(dloss_dx, acts, layer_params, y, train=True, p_
     
     y_diff = acts[0]
     y_diff_ffn = acts[1]
+    #y_diff_ffn = acts[1][0]
     
     # propagate back
     dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_ffn, train, p_gen_aux)
     dloss_dx, tlayer_ffn_dloss_dp = t_tlayer_ffn_bkwd2(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
+    #dloss_dx, tlayer_ffn_dloss_dp = t_tlayer_ffn_bkwd3(dloss_dx, acts[1][1], layer_params[2:], y_diff, t_gelu_fwd)
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y)
     dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y)
     # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
