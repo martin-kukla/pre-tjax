@@ -469,7 +469,7 @@ def t_tlayer_attn_fwd3(layer_params, qkv, mask, train, p_gen_aux=None): # input:
     heads_attns, acts = t_tlayer_attn_heads_fwd3(layer_params[0], qkv, mask, train, p_gen_aux)
     BS, H, N, D = heads_attns.shape
     attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
-    return t_proj_fwd(layer_params[-1], attn), [acts, heads_attns] # TODO XXX XXX: fix abstraction for acts object
+    return t_proj_fwd(layer_params[-1], attn), [acts, heads_attns]
 
 def t_tlayer_attn_bkwd_p(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
     jac_heads_attns_p = t_tlayer_attn_heads_bkwd_p(layer_params[0], qkv, mask, train, p_gen_aux)
@@ -810,9 +810,10 @@ def t_gpt2_tlayer_sublock1_fwd3(layer_params, y, mask, train=True, p_gen_aux=Non
         p_gen_aux = [None, None]
         
     y_diff = t_layernorm_fwd(layer_params[:2], y)
-    acts = [y_diff]
+    y_diff1 = y_diff
     y_diff, y_diff_acts = t_tlayer_attn_fwd3(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
-    acts.append((y_diff, y_diff_acts))
+    acts = [(y_diff1, y_diff_acts)]
+    acts.append(y_diff)    
     y = y + t_dropout_fwd(y_diff, train, p_gen_aux[1])
     return y, acts
 
@@ -921,12 +922,12 @@ def t_gpt2_tlayer_sublock1_bkwd3(dloss_dx, acts, layer_params, y, mask, train=Tr
         p_gen_aux = [None, None]
         
     blck_dloss_dx = dloss_dx
-    y_diff = acts[0]
-    y_diff_attn = acts[1][0]
+    y_diff = acts[0][0]
+    y_diff_attn = acts[1]
 
     # propagate back
     dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_attn, train, p_gen_aux[1])
-    dloss_dx, tlayer_attn_dloss_dp = t_tlayer_attn_bkwd3(dloss_dx, acts[1][1], layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    dloss_dx, tlayer_attn_dloss_dp = t_tlayer_attn_bkwd3(dloss_dx, acts[0][1], layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
     dloss_dx = torch.stack(dloss_dx).sum(dim=0)
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y)
     dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y)
@@ -946,6 +947,9 @@ def t_gpt2_tlayer_sublock2_fwd3(layer_params, y, train=True, p_gen_aux=None):
     acts = [y_diff]
     y_diff = t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu_fwd)
     acts.append(y_diff)
+    # TODO XXX XXX: The below line (i.e. with activation checkpointing) is not faster (due to reshapes?)
+    # Remember to stick to acts convention: each element of acts should represent single op's acts and input,
+    # so we should create a tuple of ("y_diff from above", ffn_acts) as first element of acts.
     #y_diff, ffn_acts = t_tlayer_ffn_fwd3(layer_params[-4:], y_diff, t_gelu_fwd)
     #acts.append((y_diff, ffn_acts))
     y = y + t_dropout_fwd(y_diff, train, p_gen_aux)
@@ -1039,11 +1043,12 @@ def t_gpt2_tlayer_sublock2_bkwd3(dloss_dx, acts, layer_params, y, train=True, p_
     
     y_diff = acts[0]
     y_diff_ffn = acts[1]
-    #y_diff_ffn = acts[1][0]
+    #y_diff_ffn = acts[1][0] (with activation checkpointing)
     
     # propagate back
     dloss_dx = t_dropout_bkwd2(dloss_dx, y_diff_ffn, train, p_gen_aux)
     dloss_dx, tlayer_ffn_dloss_dp = t_tlayer_ffn_bkwd2(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
+    # TODO XXX XXX: The below line (i.e. with activation checkpointing) is not faster (due to reshapes?)
     #dloss_dx, tlayer_ffn_dloss_dp = t_tlayer_ffn_bkwd3(dloss_dx, acts[1][1], layer_params[2:], y_diff, t_gelu_fwd)
     layernorm_dloss_dp = t_layernorm_bkwd2_p(dloss_dx, layer_params[:2], y)
     dloss_dx = t_layernorm_bkwd2_x(dloss_dx, layer_params[:2], y)
@@ -1066,7 +1071,7 @@ def t_gpt2_tlayer_fwd3(layer_params, y, mask, train=True, p_gen_aux=None): # inp
         p_gen_aux = [None, None, None] 
 
     y, sblck1_acts = t_gpt2_tlayer_sublock1_fwd3(layer_params[:-6], y, mask, train, p_gen_aux[:2])
-    acts = [sblck1_acts] # TODO XXX: should the element be a (None, sblck1_acts) tuple to keep consistent?
+    acts = [sblck1_acts]
     sblck2_y = y
     y, sblck2_acts = t_gpt2_tlayer_sublock2_fwd3(layer_params[-6:], y, train, p_gen_aux[2])
     acts.append((sblck2_y, sblck2_acts))
@@ -1315,10 +1320,9 @@ def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input
 
 def t_gpt2_forward_with_acts(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
     y, acts = t_gpt2_tlayers_fwd3(params, y, y_mask, y_indices, train, p_gen_aux)
-    acts.append(y)
-    
+    y1 = y
     y = t_linear_fwd(params[0], y) 
-    return y, acts
+    return y, [acts, y1]
 
 def t_gpt2_bkwd_p(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
     jac = t_gpt2_tlayers_bkwd_p(params, y, y_mask, y_indices, train, p_gen_aux)
@@ -1354,7 +1358,7 @@ def t_gpt2_bkwd3_p(dloss_dx, acts, params, y, y_mask, y_indices, train, p_gen_au
     linear_dloss_dp = t_linear_bkwd2_p(dloss_dx, params[0], acts[-1])    
     dloss_dx = t_linear_bkwd2_x(dloss_dx, params[0], acts[-1])
     
-    dloss_dp = t_gpt2_tlayers_bkwd3_p(dloss_dx, acts[:-1], params, y, y_mask, y_indices, train, p_gen_aux)    
+    dloss_dp = t_gpt2_tlayers_bkwd3_p(dloss_dx, acts[0], params, y, y_mask, y_indices, train, p_gen_aux)    
     dloss_dp = list(dloss_dp)
     
     # As we tie embedding and last projection weights (no need to add jac[0][1] as it's zeroed)
