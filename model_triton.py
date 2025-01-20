@@ -187,13 +187,17 @@ def my_t_proj_bkwd_p(layer_params, x): # input: seq_len x emb_dim
     return (jac*aux).reshape(outdims + layer_params.shape)
 
 def t_proj_bkwd2_p(dloss_dx, layer_params, x): # input: N x D
-    # Note that using vjp instead of jacrev results in notiecable difference
-    # in results, in particular dloss_dp[0][0] for the whole GPT2 is affected
-    # TODO XXX XXX: Investigate why this is happening
-    # (It's possible we don't need to do it if we write our own rowise jacobian for bmms)
-    (res, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
-    return vjpfunc(dloss_dx)[0]
-    #return _vjp_in_2d(dloss_dx, t_proj_bkwd_p(layer_params, x))
+    # There are numerical differences between using torch.func's jacrev and vjpfunc, and my VJP
+    # all of it is in the region of floating point errors
+    # (res, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
+    # return vjpfunc(dloss_dx)[0]
+    # return _vjp_in_2d(dloss_dx, t_proj_bkwd_p(layer_params, x))
+    # TODO XXX XXX: This is because we overload t_proj_fwd in few places. Clean up:
+    # We could either do reshape or have separate funcs
+    # Note we don't want to copy memory to keep perf low
+    dim = len(dloss_dx.shape)
+    eq_str = 'abc, abd -> cd' if dim==3 else ('bc, bd -> cd' if dim==2 else 'abcde, axcdf -> bcef')
+    return torch.einsum(eq_str, dloss_dx, x)
 
 
 # TODO XXX: Placebolder. Code up Jacobian for bmm
