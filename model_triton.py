@@ -265,20 +265,20 @@ def t_softmax_attn_bkwd2(dloss_dx, q, k, mask, train, p_gen_aux=None):
     dloss_dx = t_dropout_bkwd2(dloss_dx, sa, train, p_gen_aux)
     dloss_dx = dloss_dx * sa #note, sa acts as jac_exp (exp is element-wise op). TODO: check if this is correct?
     
-    # TODO XXX: code up jacobian for this bmm
-    from torch.func import jacrev
-    qk_t_bmm_fn = lambda q, k: torch.matmul(q, k.transpose(-2, -1))/math.sqrt(D)
-    # TODO XXX XXX: Investigate why the numerical differences between jacrev and vjp
+    # TODO XXX XXX : torch.func's jacrev/vjp give 2 different results,
+    # which, importantly, are different than my implementation.
+    # It's all in teh region of floating points errors..
+    #from torch.func import jacrev
+    #qk_t_bmm_fn = lambda q, k: torch.matmul(q, k.transpose(-2, -1))/math.sqrt(D)
     #bmm_jac_k = jacrev(qk_t_bmm_fn, argnums=(1))(q, k)
-    (_, vjpfunc) = torch.func.vjp(qk_t_bmm_fn, q, k)
-    #print(f'q/math.sqrt(D)', q/math.sqrt(D), '\nbmm_jac_k', bmm_jac_k) # the same values..
-    # And: bmm_jac_q would have the same values as k/math.sqrt(D) (that fact is used below) 
+    #(_, vjpfunc) = torch.func.vjp(qk_t_bmm_fn, q, k) 
     
     dloss_dx = t_log_softmax_bkwd2(dloss_dx, attn)
     dloss_dx = torch.where(torch.unsqueeze(mask,dim=1), dloss_dx, 0)
     dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
     #dloss_dk = _vjp_in_2d(dloss_dx, bmm_jac_k)
-    dloss_dk = vjpfunc(dloss_dx)[1] # note, this also computes [0]...
+    #dloss_dk = vjpfunc(dloss_dx)[1] # note, this also computes [0]...
+    dloss_dk = torch.einsum('abcd, abce->abde', dloss_dx/math.sqrt(D), q)
     
     return dloss_dq, dloss_dk
 
@@ -331,7 +331,7 @@ def t_scaled_dot_prod_attn_bkwd3(dloss_dx, acts, qkv, mask, train=True, p_gen_au
     q, k, v = torch.unbind(qkv, dim=2)
     sa = acts[0]
     
-    # propagate back
+    # propagate back: bmm (i.e. sa * v)  + SA
     dloss_dsa = torch.einsum(f'abcd, abed -> abce', dloss_dx, v)
     dloss_dv = torch.einsum(f'abcd, abce -> abed', dloss_dx, sa)
     dloss_dq, dloss_dk = t_softmax_attn_bkwd2(dloss_dsa, q, k, mask, train, p_gen_aux)
