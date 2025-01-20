@@ -7,7 +7,7 @@
 # *_bkwd_x: backward pass which computes Jacobian with respect to input
 # *_bkwd2: backward pass which computes VJPs with respect to input and parameters
 # *_bkwd3: backward pass which computes VJPs with respect to input and parameters (+ activation checkpointing)
-# (all backward passes are writen from first principle with exception of bkwd for BMM - TODO)
+# (all backward passes are writen from first principle with exception of bkwd for BMM in _bkwd_x, _bkwd_p and _bkwd2)
 
 ### PARAMS + MODEL
 DROPOUT_RATE = 0.1 # TODO: move it out, and pass as paramteter
