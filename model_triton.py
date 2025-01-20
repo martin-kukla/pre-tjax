@@ -192,8 +192,9 @@ def t_proj_bkwd2_p(dloss_dx, layer_params, x): # input: N x D
     # (res, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
     # return vjpfunc(dloss_dx)[0]
     # return _vjp_in_2d(dloss_dx, t_proj_bkwd_p(layer_params, x))
-    # TODO XXX XXX: This is because we overload t_proj_fwd in few places. Clean up:
-    # We could either do reshape or have separate funcs
+    
+    # TODO XXX XXX: This is because we overload t_proj_fwd in few places. Clean up: 
+    # einsum's elipsis ('...'), or reshape or have separate funcs
     # Note we don't want to copy memory to keep perf low
     dim = len(dloss_dx.shape)
     eq_str = 'abc, abd -> cd' if dim==3 else ('bc, bd -> cd' if dim==2 else 'abcde, axcdf -> bcef')
@@ -221,10 +222,19 @@ def my_t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
     return (jac*aux).reshape(outdims + indims)
 
 def t_proj_bkwd2_x(dloss_dx, layer_params, x):
-    # TODO XXX XXX: check whether it affects numerical values as t_proj_bkwd2_p does or not
-    (_, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
-    return vjpfunc(dloss_dx)[1]
-    #return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params, x))
+    # There are numerical differences between using torch.func's jacrev and vjpfunc, and my VJP
+    # all of it is in the region of floating point errors
+    # (_, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
+    # return vjpfunc(dloss_dx)[1]
+    # return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params, x))
+    
+    # TODO XXX XXX: This is because we overload t_proj_fwd in few places. Clean up: 
+    # einsum's elipsis ('...'), or reshape or have separate funcs
+    # Note we don't want to copy memory to keep perf low
+    dim = len(dloss_dx.shape)
+    eq_str = 'abc, cd -> abd' if dim==3 else ('bc, cd -> bd' if dim==2 else 'abcde, bcef -> acdf')
+    res = torch.einsum(eq_str, dloss_dx, layer_params)
+    return res.unsqueeze(1) if dim>3 else res # TODO XXX: how to get rid of this unsqueeze?
 
 def t_softmax_attn_fwd(q, k, mask, train, p_gen_aux=None):
     D = q.shape[-1]
