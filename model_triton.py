@@ -135,7 +135,9 @@ def t_gelu_fwd_k(x_ptr,
     k = tl.sqrt(2/math.pi) # TODO T: compute one as contant outside
     output = 0.5 * x * (1 + tanh_k(k * (x + 0.044715 * x * x * x)))
     tl.store(output_ptr + offsets, output, mask=mask)
-    
+
+# TODO T: there are some small numerical differences between t_gelu_fwd and this
+# Is it down to different implementation of tanh_k being used?
 def t_gelu_fwd_t(x: torch.Tensor):
     x_1d = x.view(-1)  # TODO T: do it in 3D instead
     output = torch.empty_like(x_1d)
@@ -154,6 +156,39 @@ def t_gelu_bkwd(x): # TODO XXX XXX: I think maths can be simplified here?
 def t_gelu_bkwd2(dloss_dx, x):
     jac = t_gelu_bkwd(x)
     return dloss_dx * jac # note, this is elementwise op
+
+# TODO T: Do it in-place?
+@triton.jit
+def t_gelu_bkwd2_k(dloss_dx_ptr,
+                    x_ptr,
+                    output_ptr,
+                    n_elements,
+                    BLOCK_SIZE: tl.constexpr,
+                    # NOTE: `constexpr` so it can be used as a shape value. <- TODO T: think about it
+                    ):
+    pid = tl.program_id(axis=0)  
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    dloss_dx = tl.load(dloss_dx_ptr + offsets, mask=mask)
+    x = tl.load(x_ptr + offsets, mask=mask)
+    k = tl.sqrt(2/math.pi) # TODO T: compute one as contant outside
+    x2 = x * x
+    tanh_term = tanh_k(k * (x + 0.044715 * x * x2)) # TODO XXX XXX: Simplify maths
+    tanh_dx = (1 - tanh_term * tanh_term) * k * (1 + 3 * 0.044715 * x2)
+    jac = 0.5 * (1 + tanh_term) + 0.5 * x * tanh_dx
+    output = dloss_dx * jac
+    tl.store(output_ptr + offsets, output, mask=mask)
+    
+def t_gelu_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor):
+    # TODO T: do it in 3D instead
+    dloss_dx_1d = dloss_dx.view(-1)
+    x_1d = x.view(-1)  
+    output = torch.empty_like(x_1d)
+    n_elements = output.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    t_gelu_bkwd2_k[grid](dloss_dx, x_1d, output, n_elements, BLOCK_SIZE=1024)
+    return output.reshape(x.shape)
 
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
