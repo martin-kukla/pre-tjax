@@ -7,7 +7,7 @@
 # *_bkwd_x: backward pass which computes Jacobian with respect to input
 # *_bkwd2: backward pass which computes VJPs with respect to input and parameters
 # *_bkwd3: backward pass which computes VJPs with respect to input and parameters (+ activation checkpointing)
-# (all backward passes are writen from first principle with exception of bkwd for BMM - TODO)
+# (all backward passes are writen from first principle with exception of bkwd for BMM in _bkwd_x, _bkwd_p and _bkwd2)
 
 ### PARAMS + MODEL
 DROPOUT_RATE = 0.1 # TODO: move it out, and pass as paramteter
@@ -187,13 +187,18 @@ def my_t_proj_bkwd_p(layer_params, x): # input: seq_len x emb_dim
     return (jac*aux).reshape(outdims + layer_params.shape)
 
 def t_proj_bkwd2_p(dloss_dx, layer_params, x): # input: N x D
-    # Note that using vjp instead of jacrev results in notiecable difference
-    # in results, in particular dloss_dp[0][0] for the whole GPT2 is affected
-    # TODO XXX XXX: Investigate why this is happening
-    # (It's possible we don't need to do it if we write our own rowise jacobian for bmms)
-    (res, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
-    return vjpfunc(dloss_dx)[0]
-    #return _vjp_in_2d(dloss_dx, t_proj_bkwd_p(layer_params, x))
+    # There are numerical differences between using torch.func's jacrev and vjpfunc, and my VJP
+    # all of it is in the region of floating point errors
+    # (res, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
+    # return vjpfunc(dloss_dx)[0]
+    # return _vjp_in_2d(dloss_dx, t_proj_bkwd_p(layer_params, x))
+    
+    # TODO XXX XXX: This is because we overload t_proj_fwd in few places. Clean up: 
+    # einsum's elipsis ('...'), or reshape or have separate funcs
+    # Note we don't want to copy memory to keep perf low
+    dim = len(dloss_dx.shape)
+    eq_str = 'abc, abd -> cd' if dim==3 else ('bc, bd -> cd' if dim==2 else 'abcde, axcdf -> bcef')
+    return torch.einsum(eq_str, dloss_dx, x)
 
 
 # TODO XXX: Placebolder. Code up Jacobian for bmm
@@ -217,10 +222,19 @@ def my_t_proj_bkwd_x(layer_params, x): # input: seq_len x emb_dim
     return (jac*aux).reshape(outdims + indims)
 
 def t_proj_bkwd2_x(dloss_dx, layer_params, x):
-    # TODO XXX XXX: check whether it affects numerical values as t_proj_bkwd2_p does or not
-    (_, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
-    return vjpfunc(dloss_dx)[1]
-    #return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params, x))
+    # There are numerical differences between using torch.func's jacrev and vjpfunc, and my VJP
+    # all of it is in the region of floating point errors
+    # (_, vjpfunc) = torch.func.vjp(t_proj_fwd, layer_params, x)
+    # return vjpfunc(dloss_dx)[1]
+    # return _vjp_in_2d(dloss_dx, t_proj_bkwd_x(layer_params, x))
+    
+    # TODO XXX XXX: This is because we overload t_proj_fwd in few places. Clean up: 
+    # einsum's elipsis ('...'), or reshape or have separate funcs
+    # Note we don't want to copy memory to keep perf low
+    dim = len(dloss_dx.shape)
+    eq_str = 'abc, cd -> abd' if dim==3 else ('bc, cd -> bd' if dim==2 else 'abcde, bcef -> acdf')
+    res = torch.einsum(eq_str, dloss_dx, layer_params)
+    return res.unsqueeze(1) if dim>3 else res # TODO XXX: how to get rid of this unsqueeze?
 
 def t_softmax_attn_fwd(q, k, mask, train, p_gen_aux=None):
     D = q.shape[-1]
@@ -265,20 +279,20 @@ def t_softmax_attn_bkwd2(dloss_dx, q, k, mask, train, p_gen_aux=None):
     dloss_dx = t_dropout_bkwd2(dloss_dx, sa, train, p_gen_aux)
     dloss_dx = dloss_dx * sa #note, sa acts as jac_exp (exp is element-wise op). TODO: check if this is correct?
     
-    # TODO XXX: code up jacobian for this bmm
-    from torch.func import jacrev
-    qk_t_bmm_fn = lambda q, k: torch.matmul(q, k.transpose(-2, -1))/math.sqrt(D)
-    # TODO XXX XXX: Investigate why the numerical differences between jacrev and vjp
+    # TODO XXX XXX : torch.func's jacrev/vjp give 2 different results,
+    # which, importantly, are different than my implementation.
+    # It's all in teh region of floating points errors..
+    #from torch.func import jacrev
+    #qk_t_bmm_fn = lambda q, k: torch.matmul(q, k.transpose(-2, -1))/math.sqrt(D)
     #bmm_jac_k = jacrev(qk_t_bmm_fn, argnums=(1))(q, k)
-    (_, vjpfunc) = torch.func.vjp(qk_t_bmm_fn, q, k)
-    #print(f'q/math.sqrt(D)', q/math.sqrt(D), '\nbmm_jac_k', bmm_jac_k) # the same values..
-    # And: bmm_jac_q would have the same values as k/math.sqrt(D) (that fact is used below) 
+    #(_, vjpfunc) = torch.func.vjp(qk_t_bmm_fn, q, k) 
     
     dloss_dx = t_log_softmax_bkwd2(dloss_dx, attn)
     dloss_dx = torch.where(torch.unsqueeze(mask,dim=1), dloss_dx, 0)
     dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
     #dloss_dk = _vjp_in_2d(dloss_dx, bmm_jac_k)
-    dloss_dk = vjpfunc(dloss_dx)[1] # note, this also computes [0]...
+    #dloss_dk = vjpfunc(dloss_dx)[1] # note, this also computes [0]...
+    dloss_dk = torch.einsum('abcd, abce->abde', dloss_dx/math.sqrt(D), q)
     
     return dloss_dq, dloss_dk
 
@@ -331,15 +345,9 @@ def t_scaled_dot_prod_attn_bkwd3(dloss_dx, acts, qkv, mask, train=True, p_gen_au
     q, k, v = torch.unbind(qkv, dim=2)
     sa = acts[0]
     
-    # propagate back
-    # TODO XXX: code up jacobian for bmm
-    from torch.func import jacrev
-    bbm_fn = lambda m1, m2: torch.matmul(m1, m2)
-    # TODO XXX XXX: Investigate why the numerical differences between jacrev and vjp
-    # jac_bmm_sa, jac_v = jacrev(bbm_fn, argnums=(0,1))(sa, v)
-    # dloss_dsa, dloss_dv = _vjps_in_2d(dloss_dx, [jac_bmm_sa, jac_v])
-    (_, vjpfunc) = torch.func.vjp(bbm_fn, sa, v)
-    dloss_dsa, dloss_dv = vjpfunc(dloss_dx)
+    # propagate back: bmm (i.e. sa * v)  + SA
+    dloss_dsa = torch.einsum(f'abcd, abed -> abce', dloss_dx, v)
+    dloss_dv = torch.einsum(f'abcd, abce -> abed', dloss_dx, sa)
     dloss_dq, dloss_dk = t_softmax_attn_bkwd2(dloss_dsa, q, k, mask, train, p_gen_aux)
     
     return dloss_dq, dloss_dk, dloss_dv

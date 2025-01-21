@@ -49,7 +49,7 @@ print(f'Vocabulary size: {model_vocab_size:_}')
 print(f'Number of params: {count_num_params(params):_}')
 
 # ### Loss + Grads + Optimizers
-from loss_and_optimizer_triton import loss_train, loss_eval, grad_loss, acc_grad_loss, t_acc_grad_loss, t_acc_grad_loss2, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms # TODO XXX: add remaining
+from loss_and_optimizer_triton import loss_train, loss_eval, grad_loss, acc_grad_loss, t_acc_grad_loss, t_acc_grad_loss2, t_acc_grad_loss3, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms # TODO XXX: add remaining
 # from loss_and_optimizer import loss_train, loss_eval, log_probs, grad_loss, predict, acc_grad_loss, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms
 
 # Choose the accumulation gradient loss function depending on the selected ML backend
@@ -59,7 +59,7 @@ if args.backend =="torchfunc_jit":
 elif args.backend =="debug_jacs":
     acc_grad_loss_func = t_acc_grad_loss
 else:
-    acc_grad_loss_func = t_acc_grad_loss2
+    acc_grad_loss_func = t_acc_grad_loss3
 
 # # Figure out non bias/gain params, as we only want to apply weight decay to those in AdamW
 # # Only 1D weights, which are initialized to 0s are bias/gain params (including bias of LayerNorm)
