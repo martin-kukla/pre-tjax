@@ -14,6 +14,8 @@ DROPOUT_RATE = 0.1 # TODO: move it out, and pass as paramteter
 
 import math
 import torch
+import triton
+import triton.language as tl
 
 ### PARAMS: they are the same as for Torch.Func, so import
 
@@ -111,6 +113,36 @@ def t_relu_bkwd(x):
 def t_gelu_fwd(x):
     k = math.sqrt(2/math.pi)
     return 0.5 * x * (1 + torch.tanh(k * (x + 0.044715 * torch.pow(x,3))))
+
+# TODO T: explore using tl.erf for implementing this
+@triton.jit
+def tanh_k(x):
+    return 2 * tl.sigmoid(2 * x) - 1
+
+# TODO T: Do it in-place?
+@triton.jit
+def t_gelu_fwd_k(x_ptr,
+               output_ptr,
+               n_elements,
+               BLOCK_SIZE: tl.constexpr,
+               # NOTE: `constexpr` so it can be used as a shape value. <- TODO T: think about it
+               ):
+    pid = tl.program_id(axis=0)  
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    k = tl.sqrt(2/math.pi) # TODO T: compute one as contant outside
+    output = 0.5 * x * (1 + tanh_k(k * (x + 0.044715 * x * x * x)))
+    tl.store(output_ptr + offsets, output, mask=mask)
+    
+def t_gelu_fwd_t(x: torch.Tensor):
+    x_1d = x.view(-1)  # TODO T: do it in 3D instead
+    output = torch.empty_like(x_1d)
+    n_elements = output.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    t_gelu_fwd_k[grid](x_1d, output, n_elements, BLOCK_SIZE=1024)
+    return output.reshape(x.shape)
 
 def t_gelu_bkwd(x): # TODO XXX XXX: I think maths can be simplified here? 
     k = math.sqrt(2/math.pi)
