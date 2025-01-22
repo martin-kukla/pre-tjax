@@ -50,6 +50,8 @@ def t_log_softmax_fwd_k(x_ptr,
         log_denominator = tl.log(log_denominator)
         output = x_minus_max - log_denominator
         # In case I want to change semantic to t_softmax_fwd_k:
+        # (In the context of SA, it would be slightly faster as we do torch.exp 
+        # on the result of this kernel, but, not for the context of CEloss)
         # nominator = tl.exp(x_minus_max)
         # denominator = tl.sum(nominator, axis=0)
         # output = nominator/denominator        
@@ -61,7 +63,7 @@ def t_log_softmax_fwd_t(x: torch.Tensor):
     n_rows, n_cols = x_2d.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols) 
     output = torch.empty_like(x_2d)
-    num_programs = min(n_rows, 2048) # TODO T: compute correct number based on occupancy/SM
+    num_programs = min(n_rows, 400) # TODO T: Recheck - This was optimized for A10 based on its occupancy&NUM_SM
     t_log_softmax_fwd_k[(num_programs,)](x_2d, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE)
     return output.reshape(x.shape)
 
