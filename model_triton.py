@@ -35,11 +35,12 @@ def t_log_softmax_fwd_k(x_ptr,
                     n_rows,
                     n_cols,
                     BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
                     # NOTE: `constexpr` so it can be used as a shape value. <- TODO T: think about it
                     ):
     row_start = tl.program_id(0)
     row_step = tl.num_programs(0)
-    for row_idx in tl.range(row_start, n_rows, row_step): # TODO T: it fails if I add stages??
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages):
         x_row_start_ptr = x_ptr + row_idx * input_row_stride
         offsets = tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_cols
@@ -63,8 +64,11 @@ def t_log_softmax_fwd_t(x: torch.Tensor):
     n_rows, n_cols = x_2d.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols) 
     output = torch.empty_like(x_2d)
-    num_programs = min(n_rows, 400) # TODO T: Recheck - This was optimized for A10 based on its occupancy&NUM_SM
-    t_log_softmax_fwd_k[(num_programs,)](x_2d, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE)
+    # TODO T: The below numbers were tuned for A10 by choosing num_wraps=8
+    # (add scripting for doing it in the codebase?)
+    num_stages = 2
+    num_programs = min(n_rows, 720) 
+    t_log_softmax_fwd_k[(num_programs,)](x_2d, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_stages=num_stages)
     return output.reshape(x.shape)
 
 def t_log_softmax_bkwd(x_logits):
