@@ -22,3 +22,8 @@ git config --global --add safe.directory /efs/notebooks/mkukla/pre-tjax
 
 pip install wandb
 wandb login
+
+
+# Corect packages of torch/triton for running torchfunc_jit/triton version
+# pip install torch==2.5.1
+# pip install triton==3.1.0
