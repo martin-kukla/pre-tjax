@@ -119,6 +119,50 @@ def t_log_softmax_bkwd2(dloss_dx, x_logits):
     
 #     return dloss_dx
 
+# Note that the kernel assumes that n_cols < BLOCK_SIZE
+@triton.jit
+def t_log_softmax_bkwd2_k(dloss_dx_ptr,
+                    x_ptr,
+                    output_ptr,
+                    dloss_dx_row_stride,
+                    input_row_stride,
+                    output_row_stride,
+                    n_rows,
+                    n_cols,
+                    BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
+                    # NOTE: `constexpr` so it can be used as a shape value. <- TODO T: think about it
+                    ):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages): # TODO T: it fails if I add stages??
+        dloss_dx_row_start_ptr = dloss_dx_ptr + row_idx * dloss_dx_row_stride
+        x_row_start_ptr = x_ptr + row_idx * input_row_stride
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_cols
+        dloss_dx = tl.load(dloss_dx_row_start_ptr + offsets, mask=mask, other=0) # TODO: WHAT SHOULD BE other here??
+        x = tl.load(x_row_start_ptr + offsets, mask=mask, other=-1e9)
+        x_minus_max = x - tl.max(x, axis=0)
+        nominator = tl.exp(x_minus_max)
+        denominator = tl.sum(nominator, axis=0)
+        jacobian = -nominator/denominator  
+        sum_dloss_dx = tl.sum(dloss_dx, axis=0)
+        output = dloss_dx + sum_dloss_dx * jacobian
+        output_row_start_ptr = output_ptr + row_idx * output_row_stride
+        tl.store(output_row_start_ptr + offsets, output, mask=mask)
+    
+def t_log_softmax_bkwd2_t(dloss_dx:torch.Tensor, x: torch.Tensor):
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    x_2d = x.reshape((-1, x.shape[-1])) # TODO T: without this reshape, this func is 2times faster
+    n_rows, n_cols = x_2d.shape
+    BLOCK_SIZE = triton.next_power_of_2(n_cols) 
+    output = torch.empty_like(x_2d)
+    # TODO T: The below numbers were tuned for A10 by choosing num_wraps=8
+    num_stages = 2
+    num_programs = min(n_rows, 560) 
+    t_log_softmax_bkwd2_k[(num_programs,)](dloss_dx_2d, x_2d, output, dloss_dx_2d.stride(0), x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_stages=num_stages)
+    return output.reshape(dloss_dx.shape)
+
 def t_embed_fwd(layer_params, x): # input: 1 x
     return layer_params[0][x] * math.sqrt(layer_params[0].shape[1]) # since layer_params[0] is vocab_size x emb_dim
 
