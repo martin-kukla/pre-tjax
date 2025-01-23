@@ -27,6 +27,7 @@ def t_log_softmax_fwd(x_logits): # compute log_softmax from logits over the last
     x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0] # as it returns (maxs, indices)
     return x_logits - torch.logsumexp(x_logits, axis=-1, keepdims=True)
 
+# Note that the kernel assumes that n_cols < BLOCK_SIZE
 @triton.jit
 def t_log_softmax_fwd_k(x_ptr,
                     output_ptr,
@@ -95,12 +96,17 @@ def t_log_softmax_bkwd2(dloss_dx, x_logits):
     BS, N = x_logits.shape
     
     x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0]
-    logsums = torch.logsumexp(x_logits, axis=-1, keepdims=True)
-    exp_logsums = torch.exp(logsums) # Q: is it going to be numerically stable?
-
     # TODO XXX: Add comments on maths why we can do elementwise VJP here
-    jac = -torch.exp(x_logits)/exp_logsums
+    nominator = torch.exp(x_logits)
+    denominator = torch.sum(nominator, axis=-1, keepdims=True)
+    jac = -nominator/denominator
     return dloss_dx + dloss_dx.sum(-1, keepdim=True)*jac.reshape(dloss_dx.shape)
+
+# After commening on the maths, remove the previous versions below
+#     logsums = torch.logsumexp(x_logits, axis=-1, keepdims=True)
+#     exp_logsums = torch.exp(logsums) # Q: is it going to be numerically stable?     
+#     jac = -torch.exp(x_logits)/exp_logsums
+# ---
 
 #     jac_eye = torch.eye(N, device=x_logits.device).unsqueeze(0).expand(BS, N, N)
 #     jac = jac_eye + jac
