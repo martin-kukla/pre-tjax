@@ -287,7 +287,7 @@ def t_gelu_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor):
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
 
-# WIP: only supports if m,n,k<BLOCK_SIZE for now
+# WIP: for now, only supports: if m,n<BLOCK_SIZE AND K%BLOCK_SIZE=0
 @triton.jit
 def t_matmul_k(a_ptr, b_ptr, output_ptr,
                 a_row_stride, a_col_stride,
@@ -298,17 +298,21 @@ def t_matmul_k(a_ptr, b_ptr, output_ptr,
                 ):
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
-    offsets = tl.arange(0, BLOCK_SIZE)   
-    a_blck_ptr = a_ptr + (pid + offsets)[:,None] * a_row_stride + offsets[None, :] * a_col_stride
-    a_blck = tl.load(a_blck_ptr, mask=offsets[None, :] < k, other=0.0)    
+    offsets = tl.arange(0, BLOCK_SIZE) 
+    
+    # TODO T: add modulo N, and modulo M ops for offsets. Why do I need them?
     
     acc = tl.zeros((BLOCK_SIZE, BLOCK_SIZE), dtype=tl.float32)
-    for _ in range(1): #TODO T: expand to the case when k>BLOCK_SIZE + move a_block inside loop
-        b_blck_ptr = b_ptr + offsets[:,None] * b_row_stride + (0 + offsets[None, :])
-        b_blck = tl.load(b_blck_ptr, mask=offsets[:, None] < k, other=0.0)
+    for i in range(0, tl.cdiv(k, BLOCK_SIZE)):
+        step_offsets = i*BLOCK_SIZE + offsets
+        a_blck_ptr = a_ptr + offsets[:,None] * a_row_stride + step_offsets[None, :] * a_col_stride
+        a_blck = tl.load(a_blck_ptr, mask=step_offsets[None, :] < k, other=0.0) 
+        b_blck_ptr = b_ptr + step_offsets[:,None] * b_row_stride + offsets[None, :] * b_col_stride
+        b_blck = tl.load(b_blck_ptr, mask=step_offsets[:, None] < k, other=0.0)
         acc = tl.dot(a_blck, b_blck, acc)
-    output_blck_ptr = output_ptr + (pid + offsets)[:,None] * output_row_stride + offsets[None, :] * output_col_stride
-    tl.store(output_blck_ptr, acc)
+    output_blck_ptr = output_ptr + offsets[:,None] * output_row_stride + offsets[None, :] * output_col_stride
+    output_mask = (offsets[:,None] <n) & (offsets[None, :]<m)
+    tl.store(output_blck_ptr, acc, mask=output_mask)
     
 def t_linear_bkwd_p(layer_params, x): # input: N x D
     outdim = layer_params[1].shape[0]
