@@ -287,17 +287,33 @@ def t_gelu_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor):
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
 
-# WIP: perf is lagging behidn torch's 
+# TODO T: there are numerical inacuracies - investigate
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
+                      num_warps=2)
+            ],
+    key=[],
+)
 @triton.jit
 def t_matmul_k(a_ptr, b_ptr, output_ptr,
                 a_row_stride, a_col_stride,
                 b_row_stride, b_col_stride,
                 output_row_stride, output_col_stride,
                 n, m, k,
-                BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,               
+                BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+                GROUP_SIZE_M: tl.constexpr
                 ):
-    n_pid = tl.program_id(0)
-    m_pid = tl.program_id(1)
+    pid = tl.program_id(0)
+    n_programs = tl.cdiv(n, BLOCK_SIZE_N)
+    orig_n_pid = pid // n_programs
+    orig_m_pid = pid % n_programs
+    
+    n_pid = orig_n_pid
+    m_pid = orig_m_pid 
+    # TODO T: Below, tiling blocks doesn't give expected speedup improvement below. Investigate
+    #n_pid = orig_n_pid % GROUP_SIZE_M + orig_m_pid // GROUP_SIZE_M
+    #m_pid = orig_n_pid // GROUP_SIZE_M + orig_m_pid % GROUP_SIZE_M
     
     offsets = tl.arange(0, BLOCK_SIZE_K)     
     n_offsets = n_pid * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -317,6 +333,19 @@ def t_matmul_k(a_ptr, b_ptr, output_ptr,
     output_blck_ptr = output_ptr + n_offsets[:,None] * output_row_stride + m_offsets[None, :] * output_col_stride
     output_mask = (n_offsets[:,None] <n) & (m_offsets[None, :]<m)
     tl.store(output_blck_ptr, acc, mask=output_mask)
+    
+def t_matmul_t(a:torch.Tensor, b: torch.Tensor):
+    N, K = a.shape
+    K2, M = b.shape
+    assert K==K2
+    assert a.is_contiguous(), "Matrix A must be contiguous" # TODO T: why do I need contiguous a?
+    output = torch.empty((N, M), device=a.device)
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N'] * triton.cdiv(M, META['BLOCK_SIZE_M'])), )
+    t_matmul_k[grid](
+        a, b, output, 
+        a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0), output.stride(1), 
+        N, M, K) 
+    return output
     
 def t_linear_bkwd_p(layer_params, x): # input: N x D
     outdim = layer_params[1].shape[0]
