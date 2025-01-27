@@ -973,6 +973,46 @@ def t_dropout_bkwd2(dloss_dx, x, train=True, p_gen_aux=None):
     mask = torch.bernoulli(torch.full_like(x, 1-DROPOUT_RATE), generator=generator) 
     return dloss_dx * mask
 
+# Note that the kernel assumes that n_cols < BLOCK_SIZE
+@triton.jit
+def t_dropout_bkwd2_k(dloss_dx_ptr,
+                    train,
+                    p_gen_aux,
+                    output_ptr,
+                    dloss_dx_row_stride,
+                    output_row_stride,
+                    n_rows,
+                    n_cols,
+                    BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
+                    ):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages):
+        dloss_dx_row_start_ptr = dloss_dx_ptr + row_idx * dloss_dx_row_stride
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_cols
+        dloss_dx = tl.load(dloss_dx_row_start_ptr + offsets, mask=mask, other=0.0)
+        if train:
+            random = tl.rand(p_gen_aux+row_idx, offsets) # TODO T: Is this enough as diff seed per row?
+            x_mask = random>T_DROPOUT_RATE
+            output = tl.where(x_mask, dloss_dx, 0.0)  
+        else:
+            output = dloss_dx * (1-T_DROPOUT_RATE)
+        output_row_start_ptr = output_ptr + row_idx * output_row_stride
+        tl.store(output_row_start_ptr + offsets, output, mask=mask)
+    
+def t_dropout_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor, train=True, p_gen_aux=None):
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1])) # TODO T: without this reshape, this func is 2times faster
+    n_rows, n_cols = dloss_dx_2d.shape
+    BLOCK_SIZE = triton.next_power_of_2(n_cols) 
+    output = torch.empty_like(dloss_dx_2d)
+    # TODO T: The below numbers were tuned for A10 by choosing num_wraps=8
+    num_stages = 2
+    num_programs = min(n_rows, 480) 
+    t_dropout_bkwd2_k[(num_programs,)](dloss_dx_2d, train, p_gen_aux, output, dloss_dx_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_stages=num_stages)
+    return output.reshape(dloss_dx.shape)
+
 def t_layernorm_fwd(layer_params, x):
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims=True) # TODO XXX: Compute variance, add epsilon and take a sqrt instead (in order to avoid division by zero)
