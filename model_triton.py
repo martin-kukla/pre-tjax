@@ -340,7 +340,7 @@ def t_matmul_t(a:torch.Tensor, b: torch.Tensor):
     assert K==K2
     assert a.is_contiguous(), "Matrix A must be contiguous" # TODO T: why do I need contiguous a?
     output = torch.empty((N, M), device=a.device)
-    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N'] * triton.cdiv(M, META['BLOCK_SIZE_M'])), )
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N']) * triton.cdiv(M, META['BLOCK_SIZE_M']), )
     t_matmul_k[grid](
         a, b, output, 
         a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0), output.stride(1), 
