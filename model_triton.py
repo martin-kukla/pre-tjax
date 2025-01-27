@@ -312,8 +312,13 @@ def t_matmul_k(a_ptr, b_ptr, output_ptr,
     n_pid = orig_n_pid
     m_pid = orig_m_pid 
     # TODO T: Below, tiling blocks doesn't give expected speedup improvement below. Investigate
-    #n_pid = orig_n_pid % GROUP_SIZE_M + orig_m_pid // GROUP_SIZE_M
-    #m_pid = orig_n_pid // GROUP_SIZE_M + orig_m_pid % GROUP_SIZE_M
+    # TODO T: simplify the grp_id calculations. Expand if m_programs are not divisable by GROUP_SIZE_M
+    # TODO T: handle if m_programs < GROUP_SIZE_M
+    # m_groups = m_programs // GROUP_SIZE_M # assumes m_programs is divisable by GROUP_SIZE_M for now
+    # n_grp_id = orig_n_pid % (n_programs//m_groups) # assumes n_programs is divisable by m_groups for now 
+    # m_grp_id = (orig_n_pid * m_groups)//n_programs
+    # n_pid =  n_grp_id * m_groups + orig_m_pid // GROUP_SIZE_M
+    # m_pid =  m_grp_id * GROUP_SIZE_M + orig_m_pid % GROUP_SIZE_M
     
     offsets = tl.arange(0, BLOCK_SIZE_K)     
     n_offsets = n_pid * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
