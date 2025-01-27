@@ -910,6 +910,50 @@ def t_dropout_fwd(x, train=True, p_gen_aux=None):
     
     return x * mask
 
+# TODO T: Think how to unify it with DROPOUT_RATE global variable above
+T_DROPOUT_RATE: triton.language.constexpr = 0.1
+
+# Note that the kernel assumes that n_cols < BLOCK_SIZE
+@triton.jit
+def t_dropout_fwd_k(x_ptr,
+                    train,
+                    p_gen_aux,
+                    output_ptr,
+                    input_row_stride,
+                    output_row_stride,
+                    n_rows,
+                    n_cols,
+                    BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
+                    ):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages):
+        x_row_start_ptr = x_ptr + row_idx * input_row_stride
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_cols
+        x = tl.load(x_row_start_ptr + offsets, mask=mask, other=0.0)
+        if train:
+            # TODO T: confirm that this is different enough seed per row
+            random = tl.rand(p_gen_aux+row_idx, offsets) 
+            x_mask = random>T_DROPOUT_RATE
+            output = tl.where(x_mask, x, 0.0)  
+        else:
+            output = x * (1-T_DROPOUT_RATE)
+        output_row_start_ptr = output_ptr + row_idx * output_row_stride
+        tl.store(output_row_start_ptr + offsets, output, mask=mask)
+    
+def t_dropout_fwd_t(x: torch.Tensor, train=True, p_gen_aux=None):
+    x_2d = x.reshape((-1, x.shape[-1])) # TODO T: without this reshape, this func is 2times faster
+    n_rows, n_cols = x_2d.shape
+    BLOCK_SIZE = triton.next_power_of_2(n_cols) 
+    output = torch.empty_like(x_2d)
+    # TODO T: The below numbers were tuned for A10 by choosing num_wraps=8
+    num_stages = 2
+    num_programs = min(n_rows, 480) 
+    t_dropout_fwd_k[(num_programs,)](x_2d, train, p_gen_aux, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_stages=num_stages)
+    return output.reshape(x.shape)
+
 def t_dropout_bkwd(x, train=True, p_gen_aux=None):
     eyed_jac = torch.eye(x.numel(), device=x.device).reshape(x.shape + x.shape)
     if not train: # we will never use this jacobian..
