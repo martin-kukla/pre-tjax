@@ -1024,6 +1024,65 @@ def t_layernorm_fwd(layer_params, x):
     normalized_x = (x - x_mean) / x_std
     return torch.multiply(normalized_x, layer_params[0][None, :]) + layer_params[1][None, :] # since both layer_params are output_dim x
 
+# Note that the kernel assumes that n_cols < BLOCK_SIZE
+# TODO T: invesitage numerical differences from pytorch implementation
+@triton.jit
+def t_layernorm_fwd_k(param1_ptr,
+                    param2_ptr,
+                    x_ptr,
+                    output_ptr,
+                    input_row_stride,
+                    output_row_stride,
+                    n_rows,
+                    n_cols,
+                    BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
+                    ):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    
+    # Load shared params
+    # TODO T: I think triton will load them once into shared memory -> confirm
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_cols
+    param1 = tl.load(param1_ptr + offsets, mask=mask, other=0.0)
+    param2 = tl.load(param2_ptr + offsets, mask=mask, other=0.0)    
+        
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages):
+        x_row_start_ptr = x_ptr + row_idx * input_row_stride    
+        x = tl.load(x_row_start_ptr + offsets, mask=mask, other=0.0)
+        
+        # compute mean and std
+        sum_x = tl.sum(x, axis=0)
+        mu = sum_x/ n_cols
+        x_minus_mu = x - mu
+        x_minus_mu2 = x_minus_mu * x_minus_mu
+        sum_x_minus_mu2 = tl.sum(x_minus_mu2, axis=0)
+        sigma2 = sum_x_minus_mu2 / (n_cols-1)
+        sigma = tl.sqrt_rn(sigma2)
+        
+        # normalize 
+        norm_x = x_minus_mu/sigma    
+        
+        # element-wise projection
+        output = param1 * norm_x + param2
+        output_row_start_ptr = output_ptr + row_idx * output_row_stride
+        tl.store(output_row_start_ptr + offsets, output, mask=mask)
+    
+def t_layernorm_fwd_t(layer_params: torch.Tensor, x: torch.Tensor):
+    x_2d = x.reshape((-1, x.shape[-1])) # TODO T: without this reshape, this func is 2times faster
+    n_rows, n_cols = x_2d.shape
+    BLOCK_SIZE = triton.next_power_of_2(n_cols) 
+    output = torch.empty_like(x_2d)
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps = 8
+    num_stages = 2
+    num_programs = min(n_rows, 480) 
+    t_layernorm_fwd_k[(num_programs,)](layer_params[0], layer_params[1], x_2d, 
+                                       output, x_2d.stride(0), output.stride(0), n_rows, n_cols, 
+                                       BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
+    return output.reshape(x.shape)
+
 def t_layernorm_bkwd_p(layer_params, x):
     x_indims = x.shape
     N = x.shape[-1]
