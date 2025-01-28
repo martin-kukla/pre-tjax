@@ -1110,6 +1110,74 @@ def t_layernorm_bkwd2_p(dloss_dx, layer_params, x):
     
     return _vjp_in_2d(dloss_dx, jac1 *jac1_aux), _vjp_in_2d(dloss_dx, jac2)
 
+# Note that the kernel assumes that n_cols < BLOCK_SIZE
+# TODO T: investigate numerical differences from torch.func implementation
+@triton.jit
+def t_layernorm_bkwd2_p_k(dloss_dx_ptr,
+                    x_ptr,
+                    output1_ptr,
+                    output2_ptr,                          
+                    dloss_dx_stride,
+                    x_row_stride,                        
+                    n_rows,
+                    n_cols,
+                    BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
+                    ):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_cols
+    
+    # TODO T: how much this is being reused?
+    _output1 = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+    _output2 = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages):
+        dloss_dx_row_start_ptr = dloss_dx_ptr + row_idx * dloss_dx_stride
+        dloss_dx = tl.load(dloss_dx_row_start_ptr + offsets, mask=mask, other=0.0)
+        x_row_start_ptr = x_ptr + row_idx * x_row_stride    
+        x = tl.load(x_row_start_ptr + offsets, mask=mask, other=0.0)
+        
+        # compute mean and std for x
+        x_sum = tl.sum(x, axis=0)
+        x_mu = x_sum/ n_cols
+        x_minus_mu = x - x_mu
+        x_minus_mu2 = x_minus_mu * x_minus_mu
+        x_minus_mu2_sum = tl.sum(x_minus_mu2, axis=0)
+        x_sigma2 = x_minus_mu2_sum / (n_cols-1)
+        x_sigma = tl.sqrt_rn(x_sigma2)
+        
+        # normalize x
+        x_norm = x_minus_mu/x_sigma    
+        
+        _output1 += dloss_dx * x_norm
+        _output2 += dloss_dx
+    
+    tl.atomic_add(output1_ptr + offsets, _output1, mask=mask)
+    tl.atomic_add(output2_ptr + offsets, _output2, mask=mask)    
+    
+def t_layernorm_bkwd2_p_t(dloss_dx:torch.Tensor, layer_params: torch.Tensor, x: torch.Tensor):
+    # TODO T: without this reshape, this func is 2times faster?
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    x_2d = x.reshape((-1, x.shape[-1])) 
+    n_rows, n_cols = x_2d.shape
+    BLOCK_SIZE = triton.next_power_of_2(n_cols) 
+    #output1 = torch.empty_like(layer_params[0])
+    #output2 = torch.empty_like(layer_params[1])
+    output1 = torch.zeros_like(layer_params[0])
+    output2 = torch.zeros_like(layer_params[1])    
+    
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps = 8
+    num_stages = 2
+    num_programs = min(n_rows, 480) 
+    t_layernorm_bkwd2_p_k[(num_programs,)](dloss_dx_2d, x_2d, output1, output2, 
+                                       dloss_dx_2d.stride(0), x_2d.stride(0), n_rows, n_cols, 
+                                       BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
+    return output1, output2
+
 def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
     BS = x.shape[0]
     N = x.shape[-1]
