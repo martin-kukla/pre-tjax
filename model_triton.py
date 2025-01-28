@@ -65,11 +65,11 @@ def t_log_softmax_fwd_t(x: torch.Tensor):
     n_rows, n_cols = x_2d.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols) 
     output = torch.empty_like(x_2d)
-    # TODO T: The below numbers were tuned for A10 by choosing num_wraps=8
-    # (add scripting for doing it in the codebase?)
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps=8
     num_stages = 2
     num_programs = min(n_rows, 720) 
-    t_log_softmax_fwd_k[(num_programs,)](x_2d, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_stages=num_stages)
+    t_log_softmax_fwd_k[(num_programs,)](x_2d, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
     return output.reshape(x.shape)
 
 def t_log_softmax_bkwd(x_logits):
@@ -157,10 +157,11 @@ def t_log_softmax_bkwd2_t(dloss_dx:torch.Tensor, x: torch.Tensor):
     n_rows, n_cols = x_2d.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols) 
     output = torch.empty_like(x_2d)
-    # TODO T: The below numbers were tuned for A10 by choosing num_wraps=8
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps=8
     num_stages = 2
     num_programs = min(n_rows, 560) 
-    t_log_softmax_bkwd2_k[(num_programs,)](dloss_dx_2d, x_2d, output, dloss_dx_2d.stride(0), x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_stages=num_stages)
+    t_log_softmax_bkwd2_k[(num_programs,)](dloss_dx_2d, x_2d, output, dloss_dx_2d.stride(0), x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
     return output.reshape(dloss_dx.shape)
 
 def t_embed_fwd(layer_params, x): # input: 1 x
@@ -948,12 +949,13 @@ def t_dropout_fwd_t(x: torch.Tensor, train=True, p_gen_aux=None):
     n_rows, n_cols = x_2d.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols) 
     output = torch.empty_like(x_2d)
-    # TODO T: The below numbers were tuned for A10 by choosing num_wraps=8
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps = 8
     num_stages = 2
     num_programs = min(n_rows, 480) 
     if not train:
         p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
-    t_dropout_fwd_k[(num_programs,)](x_2d, train, p_gen_aux, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_stages=num_stages)
+    t_dropout_fwd_k[(num_programs,)](x_2d, train, p_gen_aux, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
     return output.reshape(x.shape)
 
 def t_dropout_bkwd(x, train=True, p_gen_aux=None):
@@ -1009,10 +1011,11 @@ def t_dropout_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor, train=True, p_gen
     n_rows, n_cols = dloss_dx_2d.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols) 
     output = torch.empty_like(dloss_dx_2d)
-    # TODO T: The below numbers were tuned for A10 by choosing num_wraps=8
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps = 8
     num_stages = 2
     num_programs = min(n_rows, 480) 
-    t_dropout_bkwd2_k[(num_programs,)](dloss_dx_2d, train, p_gen_aux, output, dloss_dx_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_stages=num_stages)
+    t_dropout_bkwd2_k[(num_programs,)](dloss_dx_2d, train, p_gen_aux, output, dloss_dx_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
     return output.reshape(dloss_dx.shape)
 
 def t_layernorm_fwd(layer_params, x):
