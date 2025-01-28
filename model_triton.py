@@ -944,13 +944,15 @@ def t_dropout_fwd_k(x_ptr,
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
     
 def t_dropout_fwd_t(x: torch.Tensor, train=True, p_gen_aux=None):
-    x_2d = x.reshape((-1, x.shape[-1])) # TODO T: without this reshape, this func is 2times faster
+    x_2d = x.reshape((-1, x.shape[-1])) # TODO T: without this reshape, this func is 2times faster?
     n_rows, n_cols = x_2d.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols) 
     output = torch.empty_like(x_2d)
     # TODO T: The below numbers were tuned for A10 by choosing num_wraps=8
     num_stages = 2
     num_programs = min(n_rows, 480) 
+    if not train:
+        p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
     t_dropout_fwd_k[(num_programs,)](x_2d, train, p_gen_aux, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_stages=num_stages)
     return output.reshape(x.shape)
 
@@ -1003,7 +1005,7 @@ def t_dropout_bkwd2_k(dloss_dx_ptr,
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
     
 def t_dropout_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor, train=True, p_gen_aux=None):
-    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1])) # TODO T: without this reshape, this func is 2times faster
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1])) # TODO T: without this reshape, this func is 2times faster?
     n_rows, n_cols = dloss_dx_2d.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols) 
     output = torch.empty_like(dloss_dx_2d)
