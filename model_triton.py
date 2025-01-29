@@ -102,7 +102,7 @@ def t_log_softmax_bkwd2(dloss_dx, x_logits):
     jac = -nominator/denominator
     return dloss_dx + dloss_dx.sum(-1, keepdim=True)*jac.reshape(dloss_dx.shape)
 
-# After commening on the maths, remove the previous versions below
+# After commening on the maths above, remove the previous versions below
 #     logsums = torch.logsumexp(x_logits, axis=-1, keepdims=True)
 #     exp_logsums = torch.exp(logsums) # Q: is it going to be numerically stable?     
 #     jac = -torch.exp(x_logits)/exp_logsums
@@ -193,7 +193,9 @@ def t_indexing_bkwd2(dloss_dx, layer_params, x, coef=1):
     # Note, in order to save space, don't create full Jacobian.
     # The Full Jacobian would be BS x N x D x V x D (two last dims are params, and V is vocab size)
     # Instead, we only need information to which vabulary each position maps
-    # i.e. Jacobian of shape: BS x N x V
+    # i.e. Jacobian of shape: BS x N x V (and we do it in 2d i.e. (BS*N) x V)
+    # TODO XXX XXX: is there a way of doing this without creating mulitiplying (BS*N) x V matrix?
+    # Maybe we can create D x V directly, and populate it?
     jac = torch.zeros(torch.numel(x), layer_params[0].shape[0], device=x.device)
     jac.scatter_(1, x_1d.unsqueeze(1).to(torch.int64), coef)
     dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
