@@ -187,7 +187,7 @@ def t_embed_bkwd2(dloss_dx, layer_params, x): # input: 1 x
 
 # VJP for operation of indexing "layer_params[x]".
 # Apply additional coef to Jacobian before multipliation
-def t_indexing_bkwd2(dloss_dx, layer_params, x, coef=1):
+def legacy_t_indexing_bkwd2_(dloss_dx, layer_params, x, coef=1):
     x_1d = x.reshape(-1)
     
     # Note, in order to save space, don't create full Jacobian.
@@ -200,6 +200,18 @@ def t_indexing_bkwd2(dloss_dx, layer_params, x, coef=1):
     jac.scatter_(1, x_1d.unsqueeze(1).to(torch.int64), coef)
     dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
     return (torch.matmul(dloss_dx_2d.t(), jac).t(), )
+
+# Small numerical differences in comparison to the above version
+# TODO XXX XXX: Make sure it's just floating points errors, and remove the above
+def t_indexing_bkwd2(dloss_dx, layer_params, x, coef=1):
+    x_1d = x.reshape(-1)
+    D = dloss_dx.shape[-1]
+    dloss_dx_2d = dloss_dx.reshape((-1, D))
+    
+    output = torch.zeros(layer_params[0].shape, device=x.device)
+    indices = x_1d.unsqueeze(1).expand(x_1d.shape[0], D).to(torch.int64) # weirdly I need this expand here
+    output.scatter_add_(0, indices,  dloss_dx_2d)
+    return (coef*output, )
 
 def t_relu_fwd(x):
     return torch.where(torch.le(x, 0), 0, x) # as inputs are broadcastable in where&le - follows pytorch's implementation
