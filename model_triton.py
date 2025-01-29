@@ -1096,7 +1096,6 @@ def t_layernorm_bkwd_p(layer_params, x):
     jac2 = torch.eye(outdim, device=x.device).expand(x_indims[:-1] + (outdim, outdim))
     return jac1 *jac1_aux, jac2
 
-# TODO XXX XXX: we can get rid of these big Jacobians here..
 def t_layernorm_bkwd2_p(dloss_dx, layer_params, x):
     x_indims = x.shape
     N = x_indims[-1]
@@ -1104,11 +1103,8 @@ def t_layernorm_bkwd2_p(dloss_dx, layer_params, x):
     
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims=True)
-    jac1 = ((x-x_mean)/x_std).unsqueeze(-1).expand(x_indims + (N, ))
-    jac1_aux = torch.eye(N, device=x.device) # just used for reshaping
-    jac2 = torch.eye(N, device=x.device).expand(x_indims[:-1] + (N, N))
-    
-    return _vjp_in_2d(dloss_dx, jac1 *jac1_aux), _vjp_in_2d(dloss_dx, jac2)
+    x_norm = (x-x_mean)/x_std
+    return torch.sum(dloss_dx*x_norm, dim=[0,1]), torch.sum(dloss_dx, dim=[0,1])
 
 # Note that the kernel assumes that n_cols < BLOCK_SIZE
 # TODO T: investigate numerical differences from torch.func implementation
