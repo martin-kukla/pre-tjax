@@ -76,7 +76,7 @@ def t_avg_cross_entropy_loss_bkwd2(y_labels, x_logits):
     return dloss_dx.reshape(x_logits.shape)
 
 # Note, this doesn't follow the convention of _bkwd3 functions:
-# It's last op in the graph, thus we fused fwd and bkwd passes.
+# It's the last op of the graph, thus we fuse fwd and bkwd passes.
 # We return the results of both passes
 def t_avg_cross_entropy_loss_bkwd3(y_labels, x_logits):
     dloss_dx_shape = x_logits.shape 
