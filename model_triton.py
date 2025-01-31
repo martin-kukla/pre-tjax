@@ -1,4 +1,4 @@
-# WORK IN PROGRESS: currently, coding up Triton kernals
+# WORK IN PROGRESS: currently, coding up more efficient Triton kernals
 
 # Convention for function names:
 # *_fwd: forward pass
@@ -7,6 +7,7 @@
 # *_bkwd_x: backward pass which computes Jacobian with respect to input
 # *_bkwd2: backward pass which computes VJPs with respect to input and parameters
 # *_bkwd3: backward pass which computes VJPs with respect to input and parameters (+ activation checkpointing)
+# *_t: version of the above methods, but written in Triton (basic version of kernels for now)
 # (all backward passes are writen from first principle with exception of bkwd for BMM in _bkwd_x, _bkwd_p and _bkwd2)
 
 ### PARAMS + MODEL
@@ -14,6 +15,8 @@ DROPOUT_RATE = 0.1 # TODO: move it out, and pass as paramteter
 
 import math
 import torch
+import triton
+import triton.language as tl
 
 ### PARAMS: they are the same as for Torch.Func, so import
 
@@ -24,6 +27,51 @@ from model_torch_func import init_transformer_gpt2, count_num_params
 def t_log_softmax_fwd(x_logits): # compute log_softmax from logits over the last dimension
     x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0] # as it returns (maxs, indices)
     return x_logits - torch.logsumexp(x_logits, axis=-1, keepdims=True)
+
+# Note that the kernel assumes that n_cols < BLOCK_SIZE
+@triton.jit
+def t_log_softmax_fwd_k(x_ptr,
+                    output_ptr,
+                    input_row_stride,
+                    output_row_stride,
+                    n_rows,
+                    n_cols,
+                    BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
+                    # NOTE: `constexpr` so it can be used as a shape value. <- TODO T: think about it
+                    ):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages):
+        x_row_start_ptr = x_ptr + row_idx * input_row_stride
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_cols
+        x = tl.load(x_row_start_ptr + offsets, mask=mask, other=-1e9)
+        x_minus_max = x - tl.max(x, axis=0)
+        log_denominator = tl.exp(x_minus_max)
+        log_denominator = tl.sum(log_denominator, axis=0)
+        log_denominator = tl.log(log_denominator)
+        output = x_minus_max - log_denominator
+        # In case I want to change semantic to t_softmax_fwd_k:
+        # (In the context of SA, it would be slightly faster as we do torch.exp 
+        # on the result of this kernel, but, not for the context of CEloss)
+        # nominator = tl.exp(x_minus_max)
+        # denominator = tl.sum(nominator, axis=0)
+        # output = nominator/denominator        
+        output_row_start_ptr = output_ptr + row_idx * output_row_stride
+        tl.store(output_row_start_ptr + offsets, output, mask=mask)
+    
+def t_log_softmax_fwd_t(x: torch.Tensor):
+    x_2d = x.reshape((-1, x.shape[-1])) # TODO T: without this reshape, this func is 2times faster
+    n_rows, n_cols = x_2d.shape
+    BLOCK_SIZE = triton.next_power_of_2(n_cols) 
+    output = torch.empty_like(x_2d)
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps=8
+    num_stages = 2
+    num_programs = min(n_rows, 720) 
+    t_log_softmax_fwd_k[(num_programs,)](x_2d, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
+    return output.reshape(x.shape)
 
 def t_log_softmax_bkwd(x_logits):
     indims = x_logits.shape
@@ -49,12 +97,17 @@ def t_log_softmax_bkwd2(dloss_dx, x_logits):
     BS, N = x_logits.shape
     
     x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0]
-    logsums = torch.logsumexp(x_logits, axis=-1, keepdims=True)
-    exp_logsums = torch.exp(logsums) # Q: is it going to be numerically stable?
-
     # TODO XXX: Add comments on maths why we can do elementwise VJP here
-    jac = -torch.exp(x_logits)/exp_logsums
+    nominator = torch.exp(x_logits)
+    denominator = torch.sum(nominator, axis=-1, keepdims=True)
+    jac = -nominator/denominator
     return dloss_dx + dloss_dx.sum(-1, keepdim=True)*jac.reshape(dloss_dx.shape)
+
+# After commening on the maths above, remove the previous versions below
+#     logsums = torch.logsumexp(x_logits, axis=-1, keepdims=True)
+#     exp_logsums = torch.exp(logsums) # Q: is it going to be numerically stable?     
+#     jac = -torch.exp(x_logits)/exp_logsums
+# ---
 
 #     jac_eye = torch.eye(N, device=x_logits.device).unsqueeze(0).expand(BS, N, N)
 #     jac = jac_eye + jac
@@ -66,6 +119,51 @@ def t_log_softmax_bkwd2(dloss_dx, x_logits):
 #     dloss_dx = _vjp_in_2d_rowise(dloss_dx, jac)
     
 #     return dloss_dx
+
+# Note that the kernel assumes that n_cols < BLOCK_SIZE
+@triton.jit
+def t_log_softmax_bkwd2_k(dloss_dx_ptr,
+                    x_ptr,
+                    output_ptr,
+                    dloss_dx_row_stride,
+                    input_row_stride,
+                    output_row_stride,
+                    n_rows,
+                    n_cols,
+                    BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
+                    # NOTE: `constexpr` so it can be used as a shape value. <- TODO T: think about it
+                    ):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages): # TODO T: it fails if I add stages??
+        dloss_dx_row_start_ptr = dloss_dx_ptr + row_idx * dloss_dx_row_stride
+        x_row_start_ptr = x_ptr + row_idx * input_row_stride
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_cols
+        dloss_dx = tl.load(dloss_dx_row_start_ptr + offsets, mask=mask, other=0) # TODO: WHAT SHOULD BE other here??
+        x = tl.load(x_row_start_ptr + offsets, mask=mask, other=-1e9)
+        x_minus_max = x - tl.max(x, axis=0)
+        nominator = tl.exp(x_minus_max)
+        denominator = tl.sum(nominator, axis=0)
+        jacobian = -nominator/denominator  
+        sum_dloss_dx = tl.sum(dloss_dx, axis=0)
+        output = dloss_dx + sum_dloss_dx * jacobian
+        output_row_start_ptr = output_ptr + row_idx * output_row_stride
+        tl.store(output_row_start_ptr + offsets, output, mask=mask)
+    
+def t_log_softmax_bkwd2_t(dloss_dx:torch.Tensor, x: torch.Tensor):
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    x_2d = x.reshape((-1, x.shape[-1])) # TODO T: without this reshape, this func is 2times faster
+    n_rows, n_cols = x_2d.shape
+    BLOCK_SIZE = triton.next_power_of_2(n_cols) 
+    output = torch.empty_like(x_2d)
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps=8
+    num_stages = 2
+    num_programs = min(n_rows, 560) 
+    t_log_softmax_bkwd2_k[(num_programs,)](dloss_dx_2d, x_2d, output, dloss_dx_2d.stride(0), x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
+    return output.reshape(dloss_dx.shape)
 
 def t_embed_fwd(layer_params, x): # input: 1 x
     return layer_params[0][x] * math.sqrt(layer_params[0].shape[1]) # since layer_params[0] is vocab_size x emb_dim
@@ -90,17 +188,31 @@ def t_embed_bkwd2(dloss_dx, layer_params, x): # input: 1 x
 
 # VJP for operation of indexing "layer_params[x]".
 # Apply additional coef to Jacobian before multipliation
-def t_indexing_bkwd2(dloss_dx, layer_params, x, coef=1):
+def legacy_t_indexing_bkwd2_(dloss_dx, layer_params, x, coef=1):
     x_1d = x.reshape(-1)
     
     # Note, in order to save space, don't create full Jacobian.
     # The Full Jacobian would be BS x N x D x V x D (two last dims are params, and V is vocab size)
     # Instead, we only need information to which vabulary each position maps
-    # i.e. Jacobian of shape: BS x N x V
+    # i.e. Jacobian of shape: BS x N x V (and we do it in 2d i.e. (BS*N) x V)
+    # TODO XXX XXX: is there a way of doing this without creating mulitiplying (BS*N) x V matrix?
+    # Maybe we can create D x V directly, and populate it?
     jac = torch.zeros(torch.numel(x), layer_params[0].shape[0], device=x.device)
     jac.scatter_(1, x_1d.unsqueeze(1).to(torch.int64), coef)
     dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
     return (torch.matmul(dloss_dx_2d.t(), jac).t(), )
+
+# Small numerical differences in comparison to the above version
+# TODO XXX XXX: Make sure it's just floating points errors, and remove the above
+def t_indexing_bkwd2(dloss_dx, layer_params, x, coef=1):
+    x_1d = x.reshape(-1)
+    D = dloss_dx.shape[-1]
+    dloss_dx_2d = dloss_dx.reshape((-1, D))
+    
+    output = torch.zeros(layer_params[0].shape, device=x.device)
+    indices = x_1d.unsqueeze(1).expand(x_1d.shape[0], D).to(torch.int64) # weirdly I need this expand here
+    output.scatter_add_(0, indices,  dloss_dx_2d)
+    return (coef*output, )
 
 def t_relu_fwd(x):
     return torch.where(torch.le(x, 0), 0, x) # as inputs are broadcastable in where&le - follows pytorch's implementation
@@ -111,6 +223,38 @@ def t_relu_bkwd(x):
 def t_gelu_fwd(x):
     k = math.sqrt(2/math.pi)
     return 0.5 * x * (1 + torch.tanh(k * (x + 0.044715 * torch.pow(x,3))))
+
+# TODO T: explore using tl.erf for implementing this
+@triton.jit
+def tanh_k(x):
+    return 2 * tl.sigmoid(2 * x) - 1
+
+# TODO T: Do it in-place?
+@triton.jit
+def t_gelu_fwd_k(x_ptr,
+               output_ptr,
+               n_elements,
+               BLOCK_SIZE: tl.constexpr,
+               # NOTE: `constexpr` so it can be used as a shape value. <- TODO T: think about it
+               ):
+    pid = tl.program_id(axis=0)  
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    k = tl.sqrt(2/math.pi) # TODO T: compute one as contant outside
+    output = 0.5 * x * (1 + tanh_k(k * (x + 0.044715 * x * x * x)))
+    tl.store(output_ptr + offsets, output, mask=mask)
+
+# TODO T: there are some small numerical differences between t_gelu_fwd and this
+# Is it down to different implementation of tanh_k being used?
+def t_gelu_fwd_t(x: torch.Tensor):
+    x_1d = x.view(-1)  # TODO T: do it in 3D instead
+    output = torch.empty_like(x_1d)
+    n_elements = output.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    t_gelu_fwd_k[grid](x_1d, output, n_elements, BLOCK_SIZE=1024)
+    return output.reshape(x.shape)
 
 def t_gelu_bkwd(x): # TODO XXX XXX: I think maths can be simplified here? 
     k = math.sqrt(2/math.pi)
@@ -123,9 +267,107 @@ def t_gelu_bkwd2(dloss_dx, x):
     jac = t_gelu_bkwd(x)
     return dloss_dx * jac # note, this is elementwise op
 
+# TODO T: Do it in-place?
+@triton.jit
+def t_gelu_bkwd2_k(dloss_dx_ptr,
+                    x_ptr,
+                    output_ptr,
+                    n_elements,
+                    BLOCK_SIZE: tl.constexpr,
+                    # NOTE: `constexpr` so it can be used as a shape value. <- TODO T: think about it
+                    ):
+    pid = tl.program_id(axis=0)  
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    dloss_dx = tl.load(dloss_dx_ptr + offsets, mask=mask)
+    x = tl.load(x_ptr + offsets, mask=mask)
+    k = tl.sqrt(2/math.pi) # TODO T: compute one as contant outside
+    x2 = x * x
+    tanh_term = tanh_k(k * (x + 0.044715 * x * x2)) # TODO XXX XXX: Simplify maths
+    tanh_dx = (1 - tanh_term * tanh_term) * k * (1 + 3 * 0.044715 * x2)
+    jac = 0.5 * (1 + tanh_term) + 0.5 * x * tanh_dx
+    output = dloss_dx * jac
+    tl.store(output_ptr + offsets, output, mask=mask)
+    
+def t_gelu_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor):
+    # TODO T: do it in 3D instead
+    dloss_dx_1d = dloss_dx.view(-1)
+    x_1d = x.view(-1)  
+    output = torch.empty_like(x_1d)
+    n_elements = output.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    t_gelu_bkwd2_k[grid](dloss_dx, x_1d, output, n_elements, BLOCK_SIZE=1024)
+    return output.reshape(x.shape)
+
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
 
+# TODO T: there are numerical inacuracies - investigate
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
+                      num_warps=2)
+            ],
+    key=[],
+)
+@triton.jit
+def t_matmul_k(a_ptr, b_ptr, output_ptr,
+                a_row_stride, a_col_stride,
+                b_row_stride, b_col_stride,
+                output_row_stride, output_col_stride,
+                n, m, k,
+                BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+                GROUP_SIZE_M: tl.constexpr
+                ):
+    pid = tl.program_id(0)
+    n_programs = tl.cdiv(n, BLOCK_SIZE_N)
+    orig_n_pid = pid // n_programs
+    orig_m_pid = pid % n_programs
+    
+    n_pid = orig_n_pid
+    m_pid = orig_m_pid 
+    # TODO T: Below, tiling blocks doesn't give expected speedup improvement below. Investigate
+    # TODO T: simplify the grp_id calculations. Expand if m_programs are not divisable by GROUP_SIZE_M
+    # TODO T: handle if m_programs < GROUP_SIZE_M
+    # m_groups = m_programs // GROUP_SIZE_M # assumes m_programs is divisable by GROUP_SIZE_M for now
+    # n_grp_id = orig_n_pid % (n_programs//m_groups) # assumes n_programs is divisable by m_groups for now 
+    # m_grp_id = (orig_n_pid * m_groups)//n_programs
+    # n_pid =  n_grp_id * m_groups + orig_m_pid // GROUP_SIZE_M
+    # m_pid =  m_grp_id * GROUP_SIZE_M + orig_m_pid % GROUP_SIZE_M
+    
+    offsets = tl.arange(0, BLOCK_SIZE_K)     
+    n_offsets = n_pid * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    m_offsets = m_pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    # TODO T: Do I need modulo n, modulo m operations?    
+    n_offsets_mod = n_offsets %n
+    m_offsets_mod = m_offsets %m
+    
+    acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
+    for i in range(0, tl.cdiv(k, BLOCK_SIZE_K)):
+        k_step_offsets = i*BLOCK_SIZE_K + offsets
+        a_blck_ptr = a_ptr + n_offsets_mod[:,None] * a_row_stride + k_step_offsets[None, :] * a_col_stride
+        a_blck = tl.load(a_blck_ptr, mask=k_step_offsets[None, :] < k, other=0.0) 
+        b_blck_ptr = b_ptr + k_step_offsets[:,None] * b_row_stride + m_offsets_mod[None, :] * b_col_stride
+        b_blck = tl.load(b_blck_ptr, mask=k_step_offsets[:, None] < k, other=0.0)
+        acc = tl.dot(a_blck, b_blck, acc)
+    output_blck_ptr = output_ptr + n_offsets[:,None] * output_row_stride + m_offsets[None, :] * output_col_stride
+    output_mask = (n_offsets[:,None] <n) & (m_offsets[None, :]<m)
+    tl.store(output_blck_ptr, acc, mask=output_mask)
+    
+def t_matmul_t(a:torch.Tensor, b: torch.Tensor):
+    N, K = a.shape
+    K2, M = b.shape
+    assert K==K2
+    assert a.is_contiguous(), "Matrix A must be contiguous" # TODO T: why do I need contiguous a?
+    output = torch.empty((N, M), device=a.device)
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N']) * triton.cdiv(M, META['BLOCK_SIZE_M']), )
+    t_matmul_k[grid](
+        a, b, output, 
+        a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0), output.stride(1), 
+        N, M, K) 
+    return output
+    
 def t_linear_bkwd_p(layer_params, x): # input: N x D
     outdim = layer_params[1].shape[0]
 
@@ -684,6 +926,53 @@ def t_dropout_fwd(x, train=True, p_gen_aux=None):
     
     return x * mask
 
+# TODO T: Think how to unify it with DROPOUT_RATE global variable above
+T_DROPOUT_RATE: triton.language.constexpr = 0.1
+
+# Note that the kernel assumes that n_cols < BLOCK_SIZE
+@triton.jit
+def t_dropout_fwd_k(x_ptr,
+                    train,
+                    p_gen_aux,
+                    output_ptr,
+                    input_row_stride,
+                    output_row_stride,
+                    n_rows,
+                    n_cols,
+                    BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
+                    ):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages):
+        x_row_start_ptr = x_ptr + row_idx * input_row_stride
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_cols
+        x = tl.load(x_row_start_ptr + offsets, mask=mask, other=0.0)
+        if train:
+            # TODO T: confirm that this is different enough seed per row
+            random = tl.rand(p_gen_aux+row_idx, offsets) 
+            x_mask = random>T_DROPOUT_RATE
+            output = tl.where(x_mask, x, 0.0)  
+        else:
+            output = x * (1-T_DROPOUT_RATE)
+        output_row_start_ptr = output_ptr + row_idx * output_row_stride
+        tl.store(output_row_start_ptr + offsets, output, mask=mask)
+    
+def t_dropout_fwd_t(x: torch.Tensor, train=True, p_gen_aux=None):
+    x_2d = x.reshape((-1, x.shape[-1])) # TODO T: without this reshape, this func is 2times faster?
+    n_rows, n_cols = x_2d.shape
+    BLOCK_SIZE = triton.next_power_of_2(n_cols) 
+    output = torch.empty_like(x_2d)
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps = 8
+    num_stages = 2
+    num_programs = min(n_rows, 480) 
+    if not train:
+        p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
+    t_dropout_fwd_k[(num_programs,)](x_2d, train, p_gen_aux, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
+    return output.reshape(x.shape)
+
 def t_dropout_bkwd(x, train=True, p_gen_aux=None):
     eyed_jac = torch.eye(x.numel(), device=x.device).reshape(x.shape + x.shape)
     if not train: # we will never use this jacobian..
@@ -703,11 +992,111 @@ def t_dropout_bkwd2(dloss_dx, x, train=True, p_gen_aux=None):
     mask = torch.bernoulli(torch.full_like(x, 1-DROPOUT_RATE), generator=generator) 
     return dloss_dx * mask
 
+# Note that the kernel assumes that n_cols < BLOCK_SIZE
+@triton.jit
+def t_dropout_bkwd2_k(dloss_dx_ptr,
+                    train,
+                    p_gen_aux,
+                    output_ptr,
+                    dloss_dx_row_stride,
+                    output_row_stride,
+                    n_rows,
+                    n_cols,
+                    BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
+                    ):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages):
+        dloss_dx_row_start_ptr = dloss_dx_ptr + row_idx * dloss_dx_row_stride
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_cols
+        dloss_dx = tl.load(dloss_dx_row_start_ptr + offsets, mask=mask, other=0.0)
+        if train:
+            random = tl.rand(p_gen_aux+row_idx, offsets) # TODO T: Is this enough as diff seed per row?
+            x_mask = random>T_DROPOUT_RATE
+            output = tl.where(x_mask, dloss_dx, 0.0)  
+        else:
+            output = dloss_dx * (1-T_DROPOUT_RATE)
+        output_row_start_ptr = output_ptr + row_idx * output_row_stride
+        tl.store(output_row_start_ptr + offsets, output, mask=mask)
+    
+def t_dropout_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor, train=True, p_gen_aux=None):
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1])) # TODO T: without this reshape, this func is 2times faster?
+    n_rows, n_cols = dloss_dx_2d.shape
+    BLOCK_SIZE = triton.next_power_of_2(n_cols) 
+    output = torch.empty_like(dloss_dx_2d)
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps = 8
+    num_stages = 2
+    num_programs = min(n_rows, 480) 
+    t_dropout_bkwd2_k[(num_programs,)](dloss_dx_2d, train, p_gen_aux, output, dloss_dx_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
+    return output.reshape(dloss_dx.shape)
+
 def t_layernorm_fwd(layer_params, x):
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims=True) # TODO XXX: Compute variance, add epsilon and take a sqrt instead (in order to avoid division by zero)
     normalized_x = (x - x_mean) / x_std
     return torch.multiply(normalized_x, layer_params[0][None, :]) + layer_params[1][None, :] # since both layer_params are output_dim x
+
+# Note that the kernel assumes that n_cols < BLOCK_SIZE
+# TODO T: invesitage numerical differences from pytorch implementation
+@triton.jit
+def t_layernorm_fwd_k(param1_ptr,
+                    param2_ptr,
+                    x_ptr,
+                    output_ptr,
+                    input_row_stride,
+                    output_row_stride,
+                    n_rows,
+                    n_cols,
+                    BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
+                    ):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    
+    # Load shared params
+    # TODO T: I think triton will load them once into shared memory -> confirm
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_cols
+    param1 = tl.load(param1_ptr + offsets, mask=mask, other=0.0)
+    param2 = tl.load(param2_ptr + offsets, mask=mask, other=0.0)    
+        
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages):
+        x_row_start_ptr = x_ptr + row_idx * input_row_stride    
+        x = tl.load(x_row_start_ptr + offsets, mask=mask, other=0.0)
+        
+        # compute mean and std
+        sum_x = tl.sum(x, axis=0)
+        mu = sum_x/ n_cols
+        x_minus_mu = x - mu
+        x_minus_mu2 = x_minus_mu * x_minus_mu
+        sum_x_minus_mu2 = tl.sum(x_minus_mu2, axis=0)
+        sigma2 = sum_x_minus_mu2 / (n_cols-1)
+        sigma = tl.sqrt_rn(sigma2)
+        
+        # normalize 
+        norm_x = x_minus_mu/sigma    
+        
+        # element-wise projection
+        output = param1 * norm_x + param2
+        output_row_start_ptr = output_ptr + row_idx * output_row_stride
+        tl.store(output_row_start_ptr + offsets, output, mask=mask)
+    
+def t_layernorm_fwd_t(layer_params: torch.Tensor, x: torch.Tensor):
+    x_2d = x.reshape((-1, x.shape[-1])) # TODO T: without this reshape, this func is 2times faster
+    n_rows, n_cols = x_2d.shape
+    BLOCK_SIZE = triton.next_power_of_2(n_cols) 
+    output = torch.empty_like(x_2d)
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps = 8
+    num_stages = 2
+    num_programs = min(n_rows, 480) 
+    t_layernorm_fwd_k[(num_programs,)](layer_params[0], layer_params[1], x_2d, 
+                                       output, x_2d.stride(0), output.stride(0), n_rows, n_cols, 
+                                       BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
+    return output.reshape(x.shape)
 
 def t_layernorm_bkwd_p(layer_params, x):
     x_indims = x.shape
@@ -724,17 +1113,81 @@ def t_layernorm_bkwd_p(layer_params, x):
 
 def t_layernorm_bkwd2_p(dloss_dx, layer_params, x):
     x_indims = x.shape
-    N = x.shape[-1]
-    outdim=layer_params[1].shape[0]
+    N = x_indims[-1]
     
     
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims=True)
-    jac1 = ((x-x_mean)/x_std).unsqueeze(-1).expand(x_indims + (N, ))
-    jac1_aux = torch.eye(N, device=x.device) # just used for reshaping
-    jac2 = torch.eye(outdim, device=x.device).expand(x_indims[:-1] + (outdim, outdim))
+    x_norm = (x-x_mean)/x_std
+    return torch.sum(dloss_dx*x_norm, dim=[0,1]), torch.sum(dloss_dx, dim=[0,1])
+
+# Note that the kernel assumes that n_cols < BLOCK_SIZE
+# TODO T: investigate numerical differences from torch.func implementation
+@triton.jit
+def t_layernorm_bkwd2_p_k(dloss_dx_ptr,
+                    x_ptr,
+                    output1_ptr,
+                    output2_ptr,                          
+                    dloss_dx_stride,
+                    x_row_stride,                        
+                    n_rows,
+                    n_cols,
+                    BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
+                    ):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
     
-    return _vjp_in_2d(dloss_dx, jac1 *jac1_aux), _vjp_in_2d(dloss_dx, jac2)
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_cols
+    
+    # TODO T: how much this is being reused?
+    _output1 = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+    _output2 = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+        
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages):
+        dloss_dx_row_start_ptr = dloss_dx_ptr + row_idx * dloss_dx_stride
+        dloss_dx = tl.load(dloss_dx_row_start_ptr + offsets, mask=mask, other=0.0)
+        x_row_start_ptr = x_ptr + row_idx * x_row_stride    
+        x = tl.load(x_row_start_ptr + offsets, mask=mask, other=0.0)
+        
+        # compute mean and std for x
+        x_sum = tl.sum(x, axis=0)
+        x_mu = x_sum/ n_cols
+        x_minus_mu = x - x_mu
+        x_minus_mu2 = x_minus_mu * x_minus_mu
+        x_minus_mu2_sum = tl.sum(x_minus_mu2, axis=0)
+        x_sigma2 = x_minus_mu2_sum / (n_cols-1)
+        x_sigma = tl.sqrt_rn(x_sigma2)
+        
+        # normalize x
+        x_norm = x_minus_mu/x_sigma    
+        
+        _output1 += dloss_dx * x_norm
+        _output2 += dloss_dx
+    
+    tl.atomic_add(output1_ptr + offsets, _output1, mask=mask)
+    tl.atomic_add(output2_ptr + offsets, _output2, mask=mask)    
+    
+def t_layernorm_bkwd2_p_t(dloss_dx:torch.Tensor, layer_params: torch.Tensor, x: torch.Tensor):
+    # TODO T: without this reshape, this func is 2times faster?
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    x_2d = x.reshape((-1, x.shape[-1])) 
+    n_rows, n_cols = x_2d.shape
+    BLOCK_SIZE = triton.next_power_of_2(n_cols) 
+    #output1 = torch.empty_like(layer_params[0])
+    #output2 = torch.empty_like(layer_params[1])
+    output1 = torch.zeros_like(layer_params[0])
+    output2 = torch.zeros_like(layer_params[1])    
+    
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps = 8
+    num_stages = 2
+    num_programs = min(n_rows, 480) 
+    t_layernorm_bkwd2_p_k[(num_programs,)](dloss_dx_2d, x_2d, output1, output2, 
+                                       dloss_dx_2d.stride(0), x_2d.stride(0), n_rows, n_cols, 
+                                       BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
+    return output1, output2
 
 def normalized_x_bkwd(x): # d [(x-x_mean)/x_std] / dx
     BS = x.shape[0]
@@ -804,6 +1257,77 @@ def t_layernorm_bkwd2_x(dloss_dx, layer_params, x):
     #return normalized_x_bkwd2(dloss_dx * layer_params[0], x_2d)
     dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
     return normalized_x_bkwd2_plus(dloss_dx_2d * layer_params[0], x_2d).reshape(dloss_dx.shape)
+
+# Note that the kernel assumes that n_cols < BLOCK_SIZE
+# TODO T: investigate numerical differences from torch.func implementation
+@triton.jit
+def t_layernorm_bkwd2_x_k(dloss_dx_ptr,
+                    param1_ptr,
+                    x_ptr,
+                    output_ptr,
+                    dloss_dx_stride,
+                    x_row_stride,
+                    output_row_stride,
+                    n_rows,
+                    n_cols,
+                    BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
+                    ):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    
+    # Load shared params
+    # TODO T: I think triton will load them once into shared memory -> confirm
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_cols
+    param1 = tl.load(param1_ptr + offsets, mask=mask, other=0.0)  
+        
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages):
+        dloss_dx_row_start_ptr = dloss_dx_ptr + row_idx * dloss_dx_stride
+        dloss_dx = tl.load(dloss_dx_row_start_ptr + offsets, mask=mask, other=0.0)
+        dloss_dx = dloss_dx * param1
+        x_row_start_ptr = x_ptr + row_idx * x_row_stride    
+        x = tl.load(x_row_start_ptr + offsets, mask=mask, other=0.0)
+        
+        # compute mean and std for x
+        x_sum = tl.sum(x, axis=0)
+        x_mu = x_sum/ n_cols
+        x_minus_mu = x - x_mu
+        x_minus_mu2 = x_minus_mu * x_minus_mu
+        x_minus_mu2_sum = tl.sum(x_minus_mu2, axis=0)
+        x_sigma2 = x_minus_mu2_sum / (n_cols-1)
+        x_sigma = tl.sqrt_rn(x_sigma2)
+        
+        # normalize x
+        x_norm = x_minus_mu/x_sigma    
+        
+        # bkwd quantities
+        dloss_dx_sum = tl.sum(dloss_dx, axis=0)
+        dloss_dx_mu = dloss_dx_sum/n_cols
+        dloss_dx_x_norm = dloss_dx * x_norm
+        dloss_dx_x_norm_sum = tl.sum(dloss_dx_x_norm, axis=0)
+        dloss_dx_x_norm_mu = dloss_dx_x_norm_sum/n_cols
+        
+        n_adj = n_cols/(n_cols-1) # adjust for estimated vs calculated sigma
+        output = dloss_dx - dloss_dx_mu - x_norm * dloss_dx_x_norm_mu * n_adj
+        output_row_start_ptr = output_ptr + row_idx * output_row_stride
+        tl.store(output_row_start_ptr + offsets, output, mask=mask)
+    
+def t_layernorm_bkwd2_x_t(dloss_dx:torch.Tensor, layer_params: torch.Tensor, x: torch.Tensor):
+    # TODO T: without this reshape, this func is 2times faster?
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    x_2d = x.reshape((-1, x.shape[-1])) 
+    n_rows, n_cols = x_2d.shape
+    BLOCK_SIZE = triton.next_power_of_2(n_cols) 
+    output = torch.empty_like(x_2d)
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps = 8
+    num_stages = 2
+    num_programs = min(n_rows, 480) 
+    t_layernorm_bkwd2_x_k[(num_programs,)](dloss_dx_2d, layer_params[0], x_2d, output, 
+                                       dloss_dx_2d.stride(0), x_2d.stride(0), output.stride(0), n_rows, n_cols, 
+                                       BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
+    return output.reshape(dloss_dx.shape)
     
 def t_gpt2_tlayer_sublock1_fwd(layer_params, y, mask, train=True, p_gen_aux=None):
     if not train:
