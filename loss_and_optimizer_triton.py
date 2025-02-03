@@ -80,7 +80,7 @@ def t_avg_cross_entropy_loss_bkwd2(y_labels, x_logits):
 # We return the results of both passes
 def t_avg_cross_entropy_loss_bkwd3(y_labels, x_logits):
     dloss_dx_shape = x_logits.shape 
-    y_labels = y_labels.reshape((-1,))
+    y_labels = y_labels.reshape((-1,1))
     x_logits = x_logits.reshape((y_labels.numel(), -1))
     nonzero_count = torch.count_nonzero(y_labels)
     
@@ -88,7 +88,7 @@ def t_avg_cross_entropy_loss_bkwd3(y_labels, x_logits):
     # and computes values which are reused in propagation below
     x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0]
     x_logits_logsumexp = torch.logsumexp(x_logits, axis=-1, keepdims=True)
-    x_logits_indexed = x_logits[(torch.arange(y_labels.numel()), y_labels)]
+    x_logits_indexed = torch.gather(x_logits, 1, y_labels)
     elements_loss = torch.where(y_labels != 0, x_logits_indexed - x_logits_logsumexp, float('nan'))
     loss = -torch.nanmean(elements_loss) 
     
@@ -98,8 +98,8 @@ def t_avg_cross_entropy_loss_bkwd3(y_labels, x_logits):
     x_logits_sumexp = torch.exp(x_logits_logsumexp) # Q: is it going to be numerically stable?
     log_softmax_jac = -torch.exp(x_logits)/x_logits_sumexp # note we can precopmute exp(x_logits) as part of logsumpexp before   
     # TODO T: below I still need to create another array, can't src just be "1"?
-    log_softmax_jac.scatter_add_(1, y_labels.unsqueeze(1), torch.ones_like(log_softmax_jac)) # bkwd for indexing
-    dloss_dx = jac_nanmean.unsqueeze(1) * log_softmax_jac
+    log_softmax_jac.scatter_add_(1, y_labels, torch.ones_like(log_softmax_jac)) # bkwd for indexing
+    dloss_dx = jac_nanmean * log_softmax_jac
     
     return loss, nonzero_count, dloss_dx.reshape(dloss_dx_shape)
 
