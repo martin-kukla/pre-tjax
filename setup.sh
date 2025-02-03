@@ -27,3 +27,4 @@ wandb login
 # Corect packages of torch/triton for running torchfunc_jit/triton version
 # pip install torch==2.6.0
 # pip install triton==3.2.0
+# pip install optree==0.14.0
