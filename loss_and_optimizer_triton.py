@@ -103,7 +103,7 @@ def t_avg_cross_entropy_loss_bkwd3(y_labels, x_logits):
     
     return loss, nonzero_count, dloss_dx.reshape(dloss_dx_shape)
 
-# WIP: For now, assumes n_cols<=BLOCK_SIZE (unrealistic assumption)
+# WIP: Not efficient
 @triton.jit
 def t_avg_cross_entropy_loss_bkwd3_k(y_labels_ptr,
                     x_logits_ptr,
@@ -118,35 +118,55 @@ def t_avg_cross_entropy_loss_bkwd3_k(y_labels_ptr,
                     ):
     row_start = tl.program_id(0)
     row_step = tl.num_programs(0)
+    blcks = tl.cdiv(n_cols, BLOCK_SIZE)
     
     for row_idx in tl.range(row_start, n_rows, row_step): # TODO T: add stages?
         y_label = tl.load(y_labels_ptr + row_idx) # TODO T: load once, and keep it in shared memory?
         x_logits_row_start_ptr = x_logits_ptr + row_idx * x_logits_row_stride
-        offsets = tl.arange(0, BLOCK_SIZE)
-        mask = offsets < n_cols
-        x_logits = tl.load(x_logits_row_start_ptr + offsets, mask=mask, other=-1e9)
-        x_logits = x_logits - tl.max(x_logits, axis=0)
-        x_logits_exp = tl.exp(x_logits)
-        x_logits_sumexp = tl.sum(x_logits_exp, axis=0)
+        
+        # Compute x_logits_max and x_logits_sumexp in two phases
+        x_logits_max = -1e9
+        for blck_idx in tl.range(0, blcks):
+            offsets = blck_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < n_cols
+            x_logits = tl.load(x_logits_row_start_ptr + offsets, mask=mask, other=-1e9)
+            x_logits_max = tl.maximum(x_logits_max, tl.max(x_logits, axis=0)) 
+        x_logits_sumexp = 0.0
+        for blck_idx in tl.range(0, blcks):
+            offsets = blck_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < n_cols
+            x_logits = tl.load(x_logits_row_start_ptr + offsets, mask=mask, other=-1e9)
+            x_logits = x_logits - x_logits_max
+            x_logits_exp = tl.exp(x_logits)
+            x_logits_sumexp += tl.sum(x_logits_exp, axis=0)
         
         # If not padding token, contribute to loss/dloss_dx computation
         if y_label!=0:
-            # Workaround for the lack of tl.gather for now (slow, as it uses non-local memory)
-            #loss = tl.gather(x_logits, y_label, 0) - x_logits_logsumexp
-            tl.store(x_logits_row_start_ptr + offsets, x_logits, mask=mask) # Burns global memory
-            logit_for_y = tl.load(x_logits_row_start_ptr + y_label)
-            loss = logit_for_y - tl.log(x_logits_sumexp)
-            loss = - loss/nonzero_count
-            tl.atomic_add(loss_ptr, loss)
-        
-            # propagate back
-            # I used torch.scatter_add_, which I am not sure I can perform locally? thus
-            # using atomic_add twice
-            dloss_dx_row_start_ptr = dloss_dx_ptr + row_idx * dloss_dx_row_stride
-            tl.atomic_add(dloss_dx_row_start_ptr + y_label, -1/nonzero_count)
-            log_softmax_jac = - x_logits_exp/x_logits_sumexp
-            dloss_dx = -log_softmax_jac/nonzero_count
-            tl.atomic_add(dloss_dx_row_start_ptr + offsets, dloss_dx, mask=mask)
+            for blck_idx in tl.range(0, blcks):
+                offsets = blck_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                mask = offsets < n_cols
+                x_logits = tl.load(x_logits_row_start_ptr + offsets, mask=mask, other=-1e9)
+                x_logits = x_logits - x_logits_max
+                x_logits_exp = tl.exp(x_logits)
+                
+                if y_label>= blck_idx*BLOCK_SIZE and y_label<(blck_idx+1)*BLOCK_SIZE:    
+                    # Workaround for the lack of tl.gather for now (slow, as it uses non-local memory)
+                    #loss = tl.gather(x_logits, y_label, 0) - x_logits_logsumexp
+                    tl.store(x_logits_row_start_ptr + offsets, x_logits, mask=mask) # Burns global memory
+                    logit_for_y = tl.load(x_logits_row_start_ptr + y_label)
+                    loss = logit_for_y - tl.log(x_logits_sumexp)
+                    loss = - loss/nonzero_count
+                    tl.atomic_add(loss_ptr, loss)
+
+                # propagate back:
+                # I used torch.scatter_add_, which I am not sure I can perform locally? thus
+                # using atomic_add twice
+                dloss_dx_row_start_ptr = dloss_dx_ptr + row_idx * dloss_dx_row_stride
+                if y_label>= blck_idx*BLOCK_SIZE and y_label<(blck_idx+1)*BLOCK_SIZE: # TODO T: Can I do it using mask?
+                    tl.atomic_add(dloss_dx_row_start_ptr + y_label, -1/nonzero_count)
+                log_softmax_jac = - x_logits_exp/x_logits_sumexp
+                dloss_dx = -log_softmax_jac/nonzero_count
+                tl.atomic_add(dloss_dx_row_start_ptr + offsets, dloss_dx, mask=mask)
 
 def accuracy(y_labels, x_logits):
     return torch.nanmean(torch.where(y_labels!=0, y_labels == torch.argmax(x_logits, axis=-1), float('nan')))
