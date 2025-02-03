@@ -81,6 +81,7 @@ def t_avg_cross_entropy_loss_bkwd2(y_labels, x_logits):
 def t_avg_cross_entropy_loss_bkwd3(y_labels, x_logits):
     dloss_dx_shape = x_logits.shape 
     y_labels = y_labels.reshape((-1,1))
+    y_labels = y_labels.to(torch.int64) # TODO XXX: shouldn't we pass y_labels in int64 already?
     x_logits = x_logits.reshape((y_labels.numel(), -1))
     nonzero_count = torch.count_nonzero(y_labels)
     
@@ -94,7 +95,6 @@ def t_avg_cross_entropy_loss_bkwd3(y_labels, x_logits):
     
     # propagate back
     jac_nanmean = torch.where(y_labels != 0, -1/nonzero_count, 0)
-    y_labels = y_labels.to(torch.int64) # TODO XXX: shouldn't we pass y_labels in int64 already?
     x_logits_sumexp = torch.exp(x_logits_logsumexp) # Q: is it going to be numerically stable?
     log_softmax_jac = -torch.exp(x_logits)/x_logits_sumexp # note we can precopmute exp(x_logits) as part of logsumpexp before   
     # TODO T: below I still need to create another array, can't src just be "1"?
