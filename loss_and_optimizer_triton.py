@@ -11,6 +11,8 @@
 from functools import partial
 import math
 import torch
+import triton
+import triton.language as tl
 from torch.func import grad
 from model_torch_func import log_softmax, batched_forward_gpt2
 from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_log_softmax_bkwd2, t_batched_forward_gpt2, t_gpt2_forward, t_gpt2_forward_with_acts, t_gpt2_bkwd_p, t_gpt2_bkwd2_p, t_gpt2_bkwd3_p, _mult_jacs_in_2d
