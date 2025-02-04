@@ -105,14 +105,16 @@ def t_avg_cross_entropy_loss_bkwd3(y_labels, x_logits):
     
     return loss, nonzero_count, dloss_dx.reshape(dloss_dx_shape)
 
-# WIP: Not efficient
+# TODO T: Do online softmax instead
 @triton.jit
 def t_avg_cross_entropy_loss_bkwd3_k(y_labels_ptr,
                     x_logits_ptr,
                     loss_ptr,
                     dloss_dx_ptr,
+                    aux_idx_ptr, # Auxilary indexing operation, as alternativ for tl.gather. It uses global memory: overhead + slow
                     x_logits_row_stride,
                     dloss_dx_row_stride,
+                    aux_idx_row_stride,
                     nonzero_count,
                     n_rows,
                     n_cols,
@@ -154,8 +156,10 @@ def t_avg_cross_entropy_loss_bkwd3_k(y_labels_ptr,
                 if y_label>= blck_idx*BLOCK_SIZE and y_label<(blck_idx+1)*BLOCK_SIZE:    
                     # Workaround for the lack of tl.gather for now (slow, as it uses non-local memory)
                     #loss = tl.gather(x_logits, y_label, 0) - x_logits_logsumexp
-                    tl.store(x_logits_row_start_ptr + offsets, x_logits, mask=mask) # Burns global memory
-                    logit_for_y = tl.load(x_logits_row_start_ptr + y_label)
+                    aux_idx_row_start_ptr = aux_idx_ptr + row_idx * aux_idx_row_stride
+                    aux_idx_offsets = tl.arange(0, BLOCK_SIZE)
+                    aux_idx = tl.load(aux_idx_row_start_ptr + aux_idx_offsets) # no need for mask here
+                    logit_for_y = tl.sum(x_logits * aux_idx)
                     loss = logit_for_y - tl.log(x_logits_sumexp)
                     loss = - loss/nonzero_count
                     tl.atomic_add(loss_ptr, loss)
@@ -169,6 +173,27 @@ def t_avg_cross_entropy_loss_bkwd3_k(y_labels_ptr,
                 log_softmax_jac = - x_logits_exp/x_logits_sumexp
                 dloss_dx = -log_softmax_jac/nonzero_count
                 tl.atomic_add(dloss_dx_row_start_ptr + offsets, dloss_dx, mask=mask)
+        
+def t_avg_cross_entropy_loss_bkwd3_t(y_labels, x_logits):
+    dloss_dx_shape = x_logits.shape 
+    y_labels = y_labels.reshape((-1,))
+    x_logits = x_logits.reshape((y_labels.numel(), -1))
+    nonzero_count = torch.count_nonzero(y_labels)
+    
+    n_rows, n_cols = x_logits.shape
+    loss = torch.zeros((1), device=x_logits.device) # can we just return value from triton kernel instead? I doubt that
+    dloss_dx = torch.zeros_like(x_logits)
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps=8
+    BLOCK_SIZE = 1024
+    aux_idx = torch.zeros((n_rows, BLOCK_SIZE), device=x_logits.device)
+    aux_idx.scatter_(1, (y_labels % BLOCK_SIZE).unsqueeze(1), 1)
+    num_programs = min(n_rows, 480)
+    
+    t_avg_cross_entropy_loss_bkwd3_k[(num_programs,)](y_labels, x_logits, loss, dloss_dx, aux_idx, x_logits.stride(0), dloss_dx.stride(0), aux_idx.stride(0), nonzero_count.item(), 
+                                                      n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps)
+    
+    return loss, nonzero_count, dloss_dx.reshape(dloss_dx_shape)
 
 def accuracy(y_labels, x_logits):
     return torch.nanmean(torch.where(y_labels!=0, y_labels == torch.argmax(x_logits, axis=-1), float('nan')))
