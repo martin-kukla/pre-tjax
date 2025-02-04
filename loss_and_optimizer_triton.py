@@ -189,8 +189,8 @@ def t_avg_cross_entropy_loss_bkwd3_t(y_labels, x_logits):
     num_warps=8
     num_stages=2
     BLOCK_SIZE = 1024
-    aux_idx = torch.zeros((n_rows, BLOCK_SIZE), device=x_logits.device)
-    aux_idx.scatter_(1, (y_labels % BLOCK_SIZE).unsqueeze(1), 1)
+    aux_idx = torch.zeros((n_rows, BLOCK_SIZE), device=x_logits.device, dtype=torch.bool)
+    aux_idx.scatter_(1, (y_labels % BLOCK_SIZE).unsqueeze(1), True)
     num_programs = min(n_rows, 480)
     
     t_avg_cross_entropy_loss_bkwd3_k[(num_programs,)](y_labels, x_logits, loss, dloss_dx, aux_idx, x_logits.stride(0), dloss_dx.stride(0), aux_idx.stride(0), nonzero_count.item(), 
