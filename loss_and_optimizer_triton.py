@@ -105,7 +105,6 @@ def t_avg_cross_entropy_loss_bkwd3(y_labels, x_logits):
     
     return loss, nonzero_count, dloss_dx.reshape(dloss_dx_shape)
 
-# TODO T: Do online softmax instead
 @triton.jit
 def t_avg_cross_entropy_loss_bkwd3_k(y_labels_ptr,
                     x_logits_ptr,
@@ -129,22 +128,19 @@ def t_avg_cross_entropy_loss_bkwd3_k(y_labels_ptr,
         y_label = tl.load(y_labels_ptr + row_idx) # TODO T: load once, and keep it in shared memory?
         x_logits_row_start_ptr = x_logits_ptr + row_idx * x_logits_row_stride
         
-        # Compute x_logits_max and x_logits_sumexp in two phases
-        x_logits_max = tl.full((BLOCK_SIZE, ), -1e9, dtype=tl.float32)
+        # Online softmax (https://arxiv.org/pdf/1805.02867)
+        # computes x_logits_max & x_logits_sumexp with one memory load 
+        x_logits_max = -1e9
+        x_logits_sumexp = 0.0
+        d_s = tl.full((BLOCK_SIZE, ), 1, dtype=tl.float32)
         for blck_idx in tl.range(0, blcks):
             offsets = blck_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask = offsets < n_cols
             x_logits = tl.load(x_logits_row_start_ptr + offsets, mask=mask, other=-1e9)
-            x_logits_max = tl.maximum(x_logits_max, x_logits) 
-        x_logits_max = tl.max(x_logits_max, axis=0)
-        x_logits_sumexp = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
-        for blck_idx in tl.range(0, blcks):
-            offsets = blck_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            mask = offsets < n_cols
-            x_logits = tl.load(x_logits_row_start_ptr + offsets, mask=mask, other=-1e9)
-            x_logits = x_logits - x_logits_max
-            x_logits_sumexp += tl.exp(x_logits)
-        x_logits_sumexp = tl.sum(x_logits_sumexp, axis=0)
+            blck_x_logits_max = tl.max(x_logits, axis=0)
+            n_x_logits_max = tl.maximum(x_logits_max, blck_x_logits_max)
+            x_logits_sumexp = x_logits_sumexp * tl.exp(x_logits_max - n_x_logits_max) + tl.sum(tl.exp(x_logits - n_x_logits_max))
+            x_logits_max = n_x_logits_max
         
         # If not padding token, contribute to loss/dloss_dx computation
         if y_label!=0:
