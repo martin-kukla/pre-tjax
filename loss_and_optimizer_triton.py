@@ -177,6 +177,7 @@ def t_avg_cross_entropy_loss_bkwd3_k(y_labels_ptr,
 def t_avg_cross_entropy_loss_bkwd3_t(y_labels, x_logits):
     dloss_dx_shape = x_logits.shape 
     y_labels = y_labels.reshape((-1,))
+    y_labels = y_labels.to(torch.int64) # TODO XXX: shouldn't we pass y_labels in int64 already?
     x_logits = x_logits.reshape((y_labels.numel(), -1))
     nonzero_count = torch.count_nonzero(y_labels)
     
