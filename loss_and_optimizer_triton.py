@@ -119,12 +119,13 @@ def t_avg_cross_entropy_loss_bkwd3_k(y_labels_ptr,
                     n_rows,
                     n_cols,
                     BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
                     ):
     row_start = tl.program_id(0)
     row_step = tl.num_programs(0)
     blcks = tl.cdiv(n_cols, BLOCK_SIZE)
     
-    for row_idx in tl.range(row_start, n_rows, row_step): # TODO T: add stages?
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages):
         y_label = tl.load(y_labels_ptr + row_idx) # TODO T: load once, and keep it in shared memory?
         x_logits_row_start_ptr = x_logits_ptr + row_idx * x_logits_row_stride
         
@@ -186,13 +187,14 @@ def t_avg_cross_entropy_loss_bkwd3_t(y_labels, x_logits):
     dloss_dx = torch.zeros_like(x_logits)
     # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
     num_warps=8
+    num_stages=2
     BLOCK_SIZE = 1024
     aux_idx = torch.zeros((n_rows, BLOCK_SIZE), device=x_logits.device)
     aux_idx.scatter_(1, (y_labels % BLOCK_SIZE).unsqueeze(1), 1)
     num_programs = min(n_rows, 480)
     
     t_avg_cross_entropy_loss_bkwd3_k[(num_programs,)](y_labels, x_logits, loss, dloss_dx, aux_idx, x_logits.stride(0), dloss_dx.stride(0), aux_idx.stride(0), nonzero_count.item(), 
-                                                      n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps)
+                                                      n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
     
     return loss, nonzero_count, dloss_dx.reshape(dloss_dx_shape)
 
