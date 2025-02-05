@@ -1141,7 +1141,6 @@ def t_layernorm_bkwd2_p_k(dloss_dx_ptr,
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_cols
     
-    # TODO T: how much this is being reused?
     _output1 = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
     _output2 = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
         
@@ -1165,7 +1164,8 @@ def t_layernorm_bkwd2_p_k(dloss_dx_ptr,
         
         _output1 += dloss_dx * x_norm
         _output2 += dloss_dx
-    
+
+    # TODO T: Should we add parallel reduction strategy here: save to partial GROUP_SIZE_M sums first, before summing it up?
     tl.atomic_add(output1_ptr + offsets, _output1, mask=mask)
     tl.atomic_add(output2_ptr + offsets, _output2, mask=mask)    
     
@@ -1175,8 +1175,6 @@ def t_layernorm_bkwd2_p_t(dloss_dx:torch.Tensor, layer_params: torch.Tensor, x: 
     x_2d = x.reshape((-1, x.shape[-1])) 
     n_rows, n_cols = x_2d.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols) 
-    #output1 = torch.empty_like(layer_params[0])
-    #output2 = torch.empty_like(layer_params[1])
     output1 = torch.zeros_like(layer_params[0])
     output2 = torch.zeros_like(layer_params[1])    
     
