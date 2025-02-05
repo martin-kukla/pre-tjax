@@ -812,6 +812,57 @@ def t_tlayer_ffn_fwd(layer_params, x, activation_fn): # input: seq_len x emb_dim
     x = t_linear_fwd((layer_params[2], layer_params[3]), x)
     return x
 
+# WIP: slow + numerical differences remain the problem
+def t_tlayer_ffn_fwd_t(layer_params, x:torch.Tensor, activation_fn):
+    assert activation_fn == t_gelu_fwd
+    
+    # FFN1
+    output_dim = x.shape
+    x = x.view((-1,x.shape[-1]))
+    N, K = x.shape
+    p0 = layer_params[0].t()
+    K2, M = p0.shape
+    assert K==K2
+    assert x.is_contiguous(), "Matrix A must be contiguous" # TODO T: why do I need contiguous a?
+    mid_output = torch.empty((N, M), device=x.device)
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N']) * triton.cdiv(M, META['BLOCK_SIZE_M']), )
+
+    # TODO T: Optimize hypers
+    BLOCK_SIZE_M = 32
+    GROUP_SIZE_M = 2
+    assert triton.cdiv(M, BLOCK_SIZE_M) % GROUP_SIZE_M == 0, "Limtation of implementation" # TODO T: Complete implementation
+
+    t_matmul_k[grid](
+        x, p0, mid_output, 
+        x.stride(0), x.stride(1), p0.stride(0), p0.stride(1), mid_output.stride(0), mid_output.stride(1), 
+        N, M, K,
+        BLOCK_SIZE_N=16, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_K=16, GROUP_SIZE_M=GROUP_SIZE_M, num_stages=1, num_warps=8)
+    
+    # TODO T: move bias comp and activation inside the kernel
+    mid_output_dim = output_dim[:-1] + (-1, )
+    mid_output = mid_output + layer_params[1]
+    mid_output = t_gelu_fwd(mid_output)
+
+    # FFN2: Note the swap of dimensions (K and M)
+    p2 = layer_params[2].t()
+    assert mid_output.is_contiguous(), "Matrix A must be contiguous" # TODO T: why do I need contiguous a?
+    output = torch.empty((N, K), device=x.device) 
+    
+    # TODO T: Optimize hypers
+    BLOCK_SIZE_M = 32
+    GROUP_SIZE_M = 2
+    assert triton.cdiv(K, BLOCK_SIZE_M) % GROUP_SIZE_M == 0, "Limtation of implementation" # TODO T: Complete implementation
+    
+    t_matmul_k[grid](
+        mid_output, p2, output, 
+        mid_output.stride(0), mid_output.stride(1), p2.stride(0), p2.stride(1), output.stride(0), output.stride(1), 
+        N, K, M,
+        BLOCK_SIZE_N=16, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_K=16, GROUP_SIZE_M=GROUP_SIZE_M, num_stages=1, num_warps=8)
+    output = output + layer_params[3]
+    
+    
+    return output.view(output_dim)
+
 def t_tlayer_ffn_fwd3(layer_params, x, activation_fn): # input: seq_len x emb_dim
     x = t_linear_fwd((layer_params[0], layer_params[1]), x)
     acts = [x]
