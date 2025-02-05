@@ -303,7 +303,10 @@ def t_gelu_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor):
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
 
-# TODO T: there are numerical inacuracies - investigate
+# TODO T: There are still some numerical differences for FP32 comparing to PyTorch
+# (see: https://github.com/triton-lang/triton/issues/4574, and https://github.com/triton-lang/triton/issues/4603)
+# I skip it for now, as we probably want to do it in FP16 instead, which wouldn't have numerical issues.
+# Assumes allow_tf32 (i.e. torch.backends.cuda.matmul.allow_tf32) being True 
 @triton.jit
 def t_matmul_k(a_ptr, b_ptr, output_ptr,
                 a_row_stride, a_col_stride,
@@ -313,6 +316,9 @@ def t_matmul_k(a_ptr, b_ptr, output_ptr,
                 BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
                 GROUP_SIZE_M: tl.constexpr
                 ):
+    # Matching PyTorch's fp32 dtype ( see https://github.com/triton-lang/triton/issues/4574)
+    ASM: tl.constexpr = "cvt.rna.tf32.f32 $0, $1;"
+        
     pid = tl.program_id(0)
     n_programs = tl.cdiv(n, BLOCK_SIZE_N)
     m_programs = tl.cdiv(m, BLOCK_SIZE_M)
@@ -342,7 +348,15 @@ def t_matmul_k(a_ptr, b_ptr, output_ptr,
         a_blck = tl.load(a_blck_ptr, mask=k_step_offsets[None, :] < k, other=0.0) 
         b_blck_ptr = b_ptr + k_step_offsets[:,None] * b_row_stride + m_offsets_mod[None, :] * b_col_stride
         b_blck = tl.load(b_blck_ptr, mask=k_step_offsets[:, None] < k, other=0.0)
-        acc = tl.dot(a_blck, b_blck, acc)
+
+        # Matching PyTorch's fp32 dtype ( see https://github.com/triton-lang/triton/issues/4574)
+        a_blck = tl.inline_asm_elementwise(ASM, "=r, r", [a_blck], dtype=tl.float32, is_pure=True, pack=1)
+        b_blck = tl.inline_asm_elementwise(ASM, "=r, r", [b_blck], dtype=tl.float32, is_pure=True, pack=1)
+        
+        # TODO T: I try to match PyTorch as close as possible (https://github.com/triton-lang/triton/issues/4603)
+        acc = tl.dot(a_blck, b_blck, acc, input_precision="tf32x3")
+    # The casting below doesn't help numerical issues
+    #acc = acc.to(a_blck.dtype)
     output_blck_ptr = output_ptr + n_offsets[:,None] * output_row_stride + m_offsets[None, :] * output_col_stride
     output_mask = (n_offsets[:,None] <n) & (m_offsets[None, :]<m)
     tl.store(output_blck_ptr, acc, mask=output_mask)
