@@ -304,13 +304,6 @@ def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
 
 # TODO T: there are numerical inacuracies - investigate
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
-                      num_warps=2)
-            ],
-    key=[],
-)
 @triton.jit
 def t_matmul_k(a_ptr, b_ptr, output_ptr,
                 a_row_stride, a_col_stride,
@@ -322,19 +315,18 @@ def t_matmul_k(a_ptr, b_ptr, output_ptr,
                 ):
     pid = tl.program_id(0)
     n_programs = tl.cdiv(n, BLOCK_SIZE_N)
-    orig_n_pid = pid // n_programs
-    orig_m_pid = pid % n_programs
+    m_programs = tl.cdiv(m, BLOCK_SIZE_M)
+    n_pid = pid // m_programs
+    m_pid = pid % m_programs
     
-    n_pid = orig_n_pid
-    m_pid = orig_m_pid 
     # TODO T: Below, tiling blocks doesn't give expected speedup improvement below. Investigate
     # TODO T: simplify the grp_id calculations. Expand if m_programs are not divisable by GROUP_SIZE_M
     # TODO T: handle if m_programs < GROUP_SIZE_M
-    # m_groups = m_programs // GROUP_SIZE_M # assumes m_programs is divisable by GROUP_SIZE_M for now
-    # n_grp_id = orig_n_pid % (n_programs//m_groups) # assumes n_programs is divisable by m_groups for now 
-    # m_grp_id = (orig_n_pid * m_groups)//n_programs
-    # n_pid =  n_grp_id * m_groups + orig_m_pid // GROUP_SIZE_M
-    # m_pid =  m_grp_id * GROUP_SIZE_M + orig_m_pid % GROUP_SIZE_M
+#     m_groups = m_programs // GROUP_SIZE_M # assumes m_programs is divisable by GROUP_SIZE_M for now
+#     n_grp_id = orig_n_pid % (n_programs//m_groups) # assumes n_programs is divisable by m_groups for now 
+#     m_grp_id = (orig_n_pid * m_groups)//n_programs
+#     n_pid =  n_grp_id * m_groups + orig_m_pid // GROUP_SIZE_M
+#     m_pid =  m_grp_id * GROUP_SIZE_M + orig_m_pid % GROUP_SIZE_M
     
     offsets = tl.arange(0, BLOCK_SIZE_K)     
     n_offsets = n_pid * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -365,7 +357,8 @@ def t_matmul_t(a:torch.Tensor, b: torch.Tensor):
     t_matmul_k[grid](
         a, b, output, 
         a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0), output.stride(1), 
-        N, M, K) 
+        N, M, K,
+        BLOCK_SIZE_N=64, BLOCK_SIZE_M=32, BLOCK_SIZE_K=32, GROUP_SIZE_M=2, num_stages=5, num_warps=2)
     return output
     
 def t_linear_bkwd_p(layer_params, x): # input: N x D
