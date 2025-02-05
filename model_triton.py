@@ -303,9 +303,8 @@ def t_gelu_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor):
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
 
-# TODO T: There are still some numerical differences for FP32 comparing to PyTorch
-# (see: https://github.com/triton-lang/triton/issues/4574, and https://github.com/triton-lang/triton/issues/4603)
-# I skip it for now, as we probably want to do it in FP16 instead, which wouldn't have numerical issues.
+# This is an incomplete implementation. It makes the assumption that n_programs  
+# and m_programs are disiable by GROUP_SIZE_M
 # Assumes allow_tf32 (i.e. torch.backends.cuda.matmul.allow_tf32) being True 
 @triton.jit
 def t_matmul_k(a_ptr, b_ptr, output_ptr,
@@ -324,14 +323,16 @@ def t_matmul_k(a_ptr, b_ptr, output_ptr,
     m_programs = tl.cdiv(m, BLOCK_SIZE_M)
     orig_n_pid = pid // m_programs
     orig_m_pid = pid % m_programs
-    
-    # Grouping to improve L2 Cache hit rate
+       
+    # TODO T: Fix bug in Grouping to improve L2 Cache hit rate
     # TODO T: simplify the grp_id calculations. Expand if m_programs are not divisable by GROUP_SIZE_M
-    m_groups = m_programs // GROUP_SIZE_M # assumes m_programs is divisable by GROUP_SIZE_M for now
-    n_grp_id = orig_n_pid % (n_programs//m_groups)
-    m_grp_id = (orig_n_pid * m_groups)//n_programs
-    n_pid =  n_grp_id * m_groups + orig_m_pid // GROUP_SIZE_M
-    m_pid =  m_grp_id * GROUP_SIZE_M + orig_m_pid % GROUP_SIZE_M
+    # m_groups = m_programs // GROUP_SIZE_M # assumes m_programs is divisable by GROUP_SIZE_M for now
+    # n_grp_id = orig_n_pid % (n_programs//m_groups) # assumes n_programs is divisable by GROUP_SIZE_M for now
+    # m_grp_id = (orig_n_pid * m_groups)//n_programs
+    # n_pid =  n_grp_id * m_groups + orig_m_pid // GROUP_SIZE_M
+    # m_pid =  m_grp_id * GROUP_SIZE_M + orig_m_pid % GROUP_SIZE_M
+    n_pid = orig_n_pid
+    m_pid = orig_m_pid 
     
     offsets = tl.arange(0, BLOCK_SIZE_K)     
     n_offsets = n_pid * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -352,10 +353,9 @@ def t_matmul_k(a_ptr, b_ptr, output_ptr,
         a_blck = tl.inline_asm_elementwise(ASM, "=r, r", [a_blck], dtype=tl.float32, is_pure=True, pack=1)
         b_blck = tl.inline_asm_elementwise(ASM, "=r, r", [b_blck], dtype=tl.float32, is_pure=True, pack=1)
         
-        # TODO T: I try to match PyTorch as close as possible (https://github.com/triton-lang/triton/issues/4603)
-        acc = tl.dot(a_blck, b_blck, acc, input_precision="tf32x3")
-    # The casting below doesn't help numerical issues
-    #acc = acc.to(a_blck.dtype)
+        # To test for double precision (https://github.com/triton-lang/triton/issues/4603)
+        # Use tf32x3 (slow) below without ASM elementwise casts above 
+        acc = tl.dot(a_blck, b_blck, acc) #, input_precision="tf32x3")
     output_blck_ptr = output_ptr + n_offsets[:,None] * output_row_stride + m_offsets[None, :] * output_col_stride
     output_mask = (n_offsets[:,None] <n) & (m_offsets[None, :]<m)
     tl.store(output_blck_ptr, acc, mask=output_mask)
@@ -368,15 +368,23 @@ def t_matmul_t(a:torch.Tensor, b: torch.Tensor):
     output = torch.empty((N, M), device=a.device)
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N']) * triton.cdiv(M, META['BLOCK_SIZE_M']), )
 
-    BLOCK_SIZE_M = 32
-    GROUP_SIZE_M = 2
+    # One needs to tune params below depending on the size of input tensors 
+    BLOCK_SIZE_N = 128    
+    BLOCK_SIZE_M = 64
+    BLOCK_SIZE_K = 32
+    GROUP_SIZE_M = 8
+    num_stages = 3
+    num_warps = 8
+    assert triton.cdiv(N, BLOCK_SIZE_N) % GROUP_SIZE_M == 0, "Limtation of implementation" # TODO T: Complete implementation
     assert triton.cdiv(M, BLOCK_SIZE_M) % GROUP_SIZE_M == 0, "Limtation of implementation" # TODO T: Complete implementation
+    
 
     t_matmul_k[grid](
         a, b, output, 
         a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0), output.stride(1), 
         N, M, K,
-        BLOCK_SIZE_N=16, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_K=16, GROUP_SIZE_M=GROUP_SIZE_M, num_stages=1, num_warps=8)
+        BLOCK_SIZE_N=BLOCK_SIZE_N, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_K=BLOCK_SIZE_K, 
+        GROUP_SIZE_M=GROUP_SIZE_M, num_stages=num_stages, num_warps=num_warps)
     return output
     
 def t_linear_bkwd_p(layer_params, x): # input: N x D
