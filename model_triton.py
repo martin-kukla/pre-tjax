@@ -322,17 +322,16 @@ def t_matmul_k(a_ptr, b_ptr, output_ptr,
     pid = tl.program_id(0)
     n_programs = tl.cdiv(n, BLOCK_SIZE_N)
     m_programs = tl.cdiv(m, BLOCK_SIZE_M)
-    n_pid = pid // m_programs
-    m_pid = pid % m_programs
+    orig_n_pid = pid // m_programs
+    orig_m_pid = pid % m_programs
     
-    # TODO T: Below, tiling blocks doesn't give expected speedup improvement below. Investigate
+    # Grouping to improve L2 Cache hit rate
     # TODO T: simplify the grp_id calculations. Expand if m_programs are not divisable by GROUP_SIZE_M
-    # TODO T: handle if m_programs < GROUP_SIZE_M
-#     m_groups = m_programs // GROUP_SIZE_M # assumes m_programs is divisable by GROUP_SIZE_M for now
-#     n_grp_id = orig_n_pid % (n_programs//m_groups) # assumes n_programs is divisable by m_groups for now 
-#     m_grp_id = (orig_n_pid * m_groups)//n_programs
-#     n_pid =  n_grp_id * m_groups + orig_m_pid // GROUP_SIZE_M
-#     m_pid =  m_grp_id * GROUP_SIZE_M + orig_m_pid % GROUP_SIZE_M
+    m_groups = m_programs // GROUP_SIZE_M # assumes m_programs is divisable by GROUP_SIZE_M for now
+    n_grp_id = orig_n_pid % (n_programs//m_groups)
+    m_grp_id = (orig_n_pid * m_groups)//n_programs
+    n_pid =  n_grp_id * m_groups + orig_m_pid // GROUP_SIZE_M
+    m_pid =  m_grp_id * GROUP_SIZE_M + orig_m_pid % GROUP_SIZE_M
     
     offsets = tl.arange(0, BLOCK_SIZE_K)     
     n_offsets = n_pid * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -368,11 +367,16 @@ def t_matmul_t(a:torch.Tensor, b: torch.Tensor):
     assert a.is_contiguous(), "Matrix A must be contiguous" # TODO T: why do I need contiguous a?
     output = torch.empty((N, M), device=a.device)
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N']) * triton.cdiv(M, META['BLOCK_SIZE_M']), )
+
+    BLOCK_SIZE_M = 32
+    GROUP_SIZE_M = 2
+    assert triton.cdiv(M, BLOCK_SIZE_M) % GROUP_SIZE_M == 0, "Limtation of implementation" # TODO T: Complete implementation
+
     t_matmul_k[grid](
         a, b, output, 
         a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0), output.stride(1), 
         N, M, K,
-        BLOCK_SIZE_N=64, BLOCK_SIZE_M=32, BLOCK_SIZE_K=32, GROUP_SIZE_M=2, num_stages=5, num_warps=2)
+        BLOCK_SIZE_N=16, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_K=16, GROUP_SIZE_M=GROUP_SIZE_M, num_stages=1, num_warps=8)
     return output
     
 def t_linear_bkwd_p(layer_params, x): # input: N x D
