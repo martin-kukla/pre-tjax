@@ -832,6 +832,14 @@ def t_tlayer_ffn_fwd(layer_params, x, activation_fn): # input: seq_len x emb_dim
     x = t_linear_fwd((layer_params[2], layer_params[3]), x)
     return x
 
+# TODO T: This is slower than the baseline above when used in the training script.
+# In isolation (i.e. outisde the training script), this is slightly faster than the above,
+# but slower than JIT's version of the above. Furthermore, individual linear layers
+# are faster using the matmul kernel than t_linear_fwd (whether it's jited or not).
+# We should do the following:
+# 1. Fix grouping in matmul to improve L2 cache rate
+# 2. Investigate whether slowness is due to kernel launch (check cuda graph or even persistent kernel)
+# 3. Fuse both linear layers together, which is probably what JIT is capable of doing
 def t_tlayer_ffn_fwd_t(layer_params, x:torch.Tensor, activation_fn):
     assert activation_fn == t_gelu_fwd
     
