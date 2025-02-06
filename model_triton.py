@@ -311,14 +311,16 @@ def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
 # This is an incomplete implementation. It makes the assumption that n_programs  
 # and m_programs are disiable by GROUP_SIZE_M
 # Assumes allow_tf32 (i.e. torch.backends.cuda.matmul.allow_tf32) being True 
+# Note I overload this function by adding logic for linear layer in it
 @triton.jit
-def t_matmul_k(a_ptr, b_ptr, output_ptr,
+def t_matmul_k(a_ptr, b_ptr, output_ptr, bias_ptr,
                 a_row_stride, a_col_stride,
                 b_row_stride, b_col_stride,
                 output_row_stride, output_col_stride,
                 n, m, k,
+                ADD_BIAS: tl.constexpr, ACTIVATION: tl.constexpr, # Overloading matmul with params for linear layer
                 BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
-                GROUP_SIZE_M: tl.constexpr
+                GROUP_SIZE_M: tl.constexpr,
                 ):
     # Matching PyTorch's fp32 dtype ( see https://github.com/triton-lang/triton/issues/4574)
     ASM: tl.constexpr = "cvt.rna.tf32.f32 $0, $1;"
@@ -361,6 +363,11 @@ def t_matmul_k(a_ptr, b_ptr, output_ptr,
         # To test for double precision (https://github.com/triton-lang/triton/issues/4603)
         # Use tf32x3 (slow) below without ASM elementwise casts above 
         acc = tl.dot(a_blck, b_blck, acc) #, input_precision="tf32x3")
+    if ADD_BIAS:
+        bias = tl.load(bias_ptr + m_offsets, mask=m_offsets<m, other=0.0)
+        acc += bias # Works since Triton's broadcasting follows one of Numpy
+    if ACTIVATION == "gelu":
+        acc = gelu_k(acc)
     output_blck_ptr = output_ptr + n_offsets[:,None] * output_row_stride + m_offsets[None, :] * output_col_stride
     output_mask = (n_offsets[:,None] <n) & (m_offsets[None, :]<m)
     tl.store(output_blck_ptr, acc, mask=output_mask)
@@ -385,9 +392,9 @@ def t_matmul_t(a:torch.Tensor, b: torch.Tensor):
     
 
     t_matmul_k[grid](
-        a, b, output, 
+        a, b, output, None,
         a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0), output.stride(1), 
-        N, M, K,
+        N, M, K, ADD_BIAS=False, ACTIVATION = None,
         BLOCK_SIZE_N=BLOCK_SIZE_N, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_K=BLOCK_SIZE_K, 
         GROUP_SIZE_M=GROUP_SIZE_M, num_stages=num_stages, num_warps=num_warps)
     return output
