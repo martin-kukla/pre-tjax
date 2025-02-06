@@ -229,6 +229,12 @@ def t_gelu_fwd(x):
 def tanh_k(x):
     return 2 * tl.sigmoid(2 * x) - 1
 
+gelu_k_const:tl.constexpr = math.sqrt(2/math.pi)
+@triton.jit
+def gelu_k(x):
+    return 0.5 * x * (1 + tanh_k(gelu_k_const * (x + 0.044715 * x * x * x)))
+    
+    
 # TODO T: Do it in-place?
 @triton.jit
 def t_gelu_fwd_k(x_ptr,
@@ -242,8 +248,7 @@ def t_gelu_fwd_k(x_ptr,
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
     x = tl.load(x_ptr + offsets, mask=mask)
-    k = tl.sqrt(2/math.pi) # TODO T: compute one as contant outside
-    output = 0.5 * x * (1 + tanh_k(k * (x + 0.044715 * x * x * x)))
+    output = 0.5 * x * (1 + tanh_k(gelu_k_const * (x + 0.044715 * x * x * x)))
     tl.store(output_ptr + offsets, output, mask=mask)
 
 # TODO T: there are some small numerical differences between t_gelu_fwd and this
