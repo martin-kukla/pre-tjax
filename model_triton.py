@@ -572,12 +572,12 @@ def t_softmax_attn_bkwd2(dloss_dx, q, k, mask, train, p_gen_aux=None):
 def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
     softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train, p_gen_aux)
-    return torch.matmul(softmaxed_attn, v) # output: BS x N x D
+    return torch.matmul(softmaxed_attn, v) # output: BS x H x N x D
 
 def t_scaled_dot_prod_attn_fwd3(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
     softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train, p_gen_aux)
-    return torch.matmul(softmaxed_attn, v), [softmaxed_attn] # output: BS x N x D
+    return torch.matmul(softmaxed_attn, v), [softmaxed_attn] # output: BS x H x N x D
 
 def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     BS, H, _, N, D = qkv.shape
