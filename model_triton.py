@@ -220,7 +220,7 @@ def t_relu_fwd(x):
 def t_relu_bkwd(x):
     return torch.where(torch.le(x, 0), 0, 1)
 
-def t_gelu_fwd(x):
+def t_gelu_fwd_(x):
     k = math.sqrt(2/math.pi)
     return 0.5 * x * (1 + torch.tanh(k * (x + 0.044715 * torch.pow(x,3))))
 
@@ -253,7 +253,7 @@ def t_gelu_fwd_k(x_ptr,
 
 # TODO T: there are some small numerical differences between t_gelu_fwd and this
 # Is it down to different implementation of tanh_k being used?
-def t_gelu_fwd_t(x: torch.Tensor):
+def t_gelu_fwd(x: torch.Tensor):
     x_1d = x.view(-1)  # TODO T: do it in 3D instead
     output = torch.empty_like(x_1d)
     n_elements = output.numel()
@@ -268,7 +268,7 @@ def t_gelu_bkwd(x): # TODO XXX XXX: I think maths can be simplified here?
     
     return 0.5 * (1 + tanh_term) + 0.5 * x * tanh_dx
 
-def t_gelu_bkwd2(dloss_dx, x):
+def t_gelu_bkwd2_(dloss_dx, x):
     jac = t_gelu_bkwd(x)
     return dloss_dx * jac # note, this is elementwise op
 
@@ -295,7 +295,7 @@ def t_gelu_bkwd2_k(dloss_dx_ptr,
     output = dloss_dx * jac
     tl.store(output_ptr + offsets, output, mask=mask)
     
-def t_gelu_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor):
+def t_gelu_bkwd2(dloss_dx: torch.Tensor, x: torch.Tensor):
     # TODO T: do it in 3D instead
     dloss_dx_1d = dloss_dx.view(-1)
     x_1d = x.view(-1)  
@@ -514,7 +514,7 @@ def t_softmax_attn_fwd(q, k, mask, train, p_gen_aux=None):
     attn = torch.matmul(q, torch.transpose(k, -2, -1))
     attn = attn / math.sqrt(D)
     attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
-    sa = torch.exp(t_log_softmax_fwd(attn))
+    sa = torch.exp(t_log_softmax_fwd(attn)) #torch.exp(t_log_softmax_fwd_t(attn)) XXX
     sa = t_dropout_fwd(sa, train, p_gen_aux)
     return sa
 
@@ -560,7 +560,7 @@ def t_softmax_attn_bkwd2(dloss_dx, q, k, mask, train, p_gen_aux=None):
     #bmm_jac_k = jacrev(qk_t_bmm_fn, argnums=(1))(q, k)
     #(_, vjpfunc) = torch.func.vjp(qk_t_bmm_fn, q, k) 
     
-    dloss_dx = t_log_softmax_bkwd2(dloss_dx, attn)
+    dloss_dx = t_log_softmax_bkwd2_t(dloss_dx, attn)
     dloss_dx = torch.where(torch.unsqueeze(mask,dim=1), dloss_dx, 0)
     dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
     #dloss_dk = _vjp_in_2d(dloss_dx, bmm_jac_k)
@@ -1012,7 +1012,7 @@ def t_tlayer_ffn_bkwd3(dloss_dx, acts, layer_params, x, activation_fn):
 
     return dloss_dx_2d.reshape(x.shape), tuple(ffn1_dloss_dp+ffn2_dloss_dp)
 
-def t_dropout_fwd(x, train=True, p_gen_aux=None):
+def t_dropout_fwd_(x, train=True, p_gen_aux=None):
     if not train: # As we jit the whole loss/inference, the train param is known at tracing time.
         return x * (1-DROPOUT_RATE)
     
@@ -1055,7 +1055,7 @@ def t_dropout_fwd_k(x_ptr,
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
     
-def t_dropout_fwd_t(x: torch.Tensor, train=True, p_gen_aux=None):
+def t_dropout_fwd(x: torch.Tensor, train=True, p_gen_aux=None):
     x_2d = x.reshape((-1, x.shape[-1])) # TODO T: without this reshape, this func is 2times faster?
     n_rows, n_cols = x_2d.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols) 
@@ -1079,7 +1079,7 @@ def t_dropout_bkwd(x, train=True, p_gen_aux=None):
     mask = torch.bernoulli(torch.full_like(x, 1-DROPOUT_RATE), generator=generator) 
     return eyed_jac * mask
 
-def t_dropout_bkwd2(dloss_dx, x, train=True, p_gen_aux=None):
+def t_dropout_bkwd2_(dloss_dx, x, train=True, p_gen_aux=None):
     if not train: # we will never use this jacobian..
         return dloss_dx * (1-DROPOUT_RATE)
 
@@ -1117,7 +1117,7 @@ def t_dropout_bkwd2_k(dloss_dx_ptr,
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
     
-def t_dropout_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor, train=True, p_gen_aux=None):
+def t_dropout_bkwd2(dloss_dx: torch.Tensor, x: torch.Tensor, train=True, p_gen_aux=None):
     dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1])) # TODO T: without this reshape, this func is 2times faster?
     n_rows, n_cols = dloss_dx_2d.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols) 
@@ -1129,7 +1129,7 @@ def t_dropout_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor, train=True, p_gen
     t_dropout_bkwd2_k[(num_programs,)](dloss_dx_2d, train, p_gen_aux, output, dloss_dx_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
     return output.reshape(dloss_dx.shape)
 
-def t_layernorm_fwd(layer_params, x):
+def t_layernorm_fwd_(layer_params, x):
     x_mean = torch.mean(x, axis=-1, keepdims=True)
     x_std = torch.std(x, axis=-1, keepdims=True) # TODO XXX: Compute variance, add epsilon and take a sqrt instead (in order to avoid division by zero)
     normalized_x = (x - x_mean) / x_std
@@ -1180,7 +1180,7 @@ def t_layernorm_fwd_k(param1_ptr,
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
     
-def t_layernorm_fwd_t(layer_params: torch.Tensor, x: torch.Tensor):
+def t_layernorm_fwd(layer_params: torch.Tensor, x: torch.Tensor):
     x_2d = x.reshape((-1, x.shape[-1])) # TODO T: without this reshape, this func is 2times faster
     n_rows, n_cols = x_2d.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols) 
@@ -1207,7 +1207,7 @@ def t_layernorm_bkwd_p(layer_params, x):
     jac2 = torch.eye(outdim, device=x.device).expand(x_indims[:-1] + (outdim, outdim))
     return jac1 *jac1_aux, jac2
 
-def t_layernorm_bkwd2_p(dloss_dx, layer_params, x):
+def t_layernorm_bkwd2_p_(dloss_dx, layer_params, x):
     x_indims = x.shape
     N = x_indims[-1]
     
@@ -1265,7 +1265,7 @@ def t_layernorm_bkwd2_p_k(dloss_dx_ptr,
     tl.atomic_add(output1_ptr + offsets, _output1, mask=mask)
     tl.atomic_add(output2_ptr + offsets, _output2, mask=mask)    
     
-def t_layernorm_bkwd2_p_t(dloss_dx:torch.Tensor, layer_params: torch.Tensor, x: torch.Tensor):
+def t_layernorm_bkwd2_p(dloss_dx:torch.Tensor, layer_params: torch.Tensor, x: torch.Tensor):
     # TODO T: without this reshape, this func is 2times faster?
     dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
     x_2d = x.reshape((-1, x.shape[-1])) 
@@ -1345,7 +1345,7 @@ def t_layernorm_bkwd_x(layer_params, x):
     jac_x_2d = (layer_params[0] * normalized_x_bkwd(x_2d)).transpose(-3,-1)
     return jac_x_2d.reshape(x.shape + x.shape)
 
-def t_layernorm_bkwd2_x(dloss_dx, layer_params, x):
+def t_layernorm_bkwd2_x_(dloss_dx, layer_params, x):
     x_2d = x.reshape((-1, x.shape[-1]))
     # TODO XXX XXX: investigate the difference in memory consumption between two
     #return normalized_x_bkwd2(dloss_dx * layer_params[0], x_2d)
@@ -1407,7 +1407,7 @@ def t_layernorm_bkwd2_x_k(dloss_dx_ptr,
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
     
-def t_layernorm_bkwd2_x_t(dloss_dx:torch.Tensor, layer_params: torch.Tensor, x: torch.Tensor):
+def t_layernorm_bkwd2_x(dloss_dx:torch.Tensor, layer_params: torch.Tensor, x: torch.Tensor):
     # TODO T: without this reshape, this func is 2times faster?
     dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
     x_2d = x.reshape((-1, x.shape[-1])) 

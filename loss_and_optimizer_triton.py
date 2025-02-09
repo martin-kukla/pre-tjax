@@ -272,7 +272,7 @@ def t_loss_bkwd3(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs
      
     logits, acts = t_gpt2_forward_with_acts(params, y_in, y_mask, y_indices, train, p_gen_aux) 
     
-    loss_val, tokens_count, dloss_dx = t_avg_cross_entropy_loss_bkwd3(y_out, logits)
+    loss_val, tokens_count, dloss_dx = t_avg_cross_entropy_loss_bkwd3_t(y_out, logits)
     dloss_dx = t_gpt2_bkwd3_p(dloss_dx, acts, params, y_in, y_mask, y_indices, train, p_gen_aux)
     acc = accuracy(y_out, logits)
     
