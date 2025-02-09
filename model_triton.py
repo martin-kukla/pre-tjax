@@ -1141,7 +1141,6 @@ T_DROPOUT_RATE: triton.language.constexpr = 0.1
 @triton.jit
 def dropout_k(x, train, p_gen_aux, offsets):
     if train:
-        # TODO T: confirm that this is different enough seed per row
         random = tl.rand(p_gen_aux, offsets) 
         x_mask = random>T_DROPOUT_RATE
         output = tl.where(x_mask, x, 0.0)  
@@ -1169,6 +1168,7 @@ def t_dropout_fwd_k(x_ptr,
         offsets = tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_cols
         x = tl.load(x_row_start_ptr + offsets, mask=mask, other=0.0)
+        # TODO T: confirm that this is different enough seed per row
         output = dropout_k(x, train, p_gen_aux+row_idx, offsets)
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
