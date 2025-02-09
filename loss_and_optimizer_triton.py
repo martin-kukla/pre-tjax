@@ -278,6 +278,18 @@ def t_loss_bkwd3(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs
     
     return dloss_dx, (loss_val, acc, tokens_count/y_out.numel())
 
+def t_loss_bkwd3_t(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N    
+    y_in = y[:, :-1]
+    y_out = y[:, 1:]
+     
+    logits, acts = t_gpt2_forward_with_acts(params, y_in, y_mask, y_indices, train, p_gen_aux) 
+    
+    loss_val, tokens_count, dloss_dx = t_avg_cross_entropy_loss_bkwd3_t(y_out, logits)
+    dloss_dx = t_gpt2_bkwd3_p(dloss_dx, acts, params, y_in, y_mask, y_indices, train, p_gen_aux)
+    acc = accuracy(y_out, logits)
+    
+    return dloss_dx, (loss_val, acc, tokens_count/y_out.numel())
+
 # print(f'iter #{i} loss {loss_train(params, jnp.array(x[:1]), jnp.array(y[:1]), random.PRNGKey(0))[0] }')
 
 # with jax.disable_jit():
@@ -319,23 +331,20 @@ def sample_p_gen_aux(params):
     return [it.item() for it in p_gen_aux]
 
 def t_acc_grad_loss(acc_grads, params, y, y_mask, y_indices):
-    p_gen_aux = sample_p_gen_aux(params)
-    grad_loss_fn = partial(t_loss_bkwd, train=True, p_gen_aux=p_gen_aux)
-    return _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices)
+    return _acc_grad_loss(t_loss_bkwd, acc_grads, params, y, y_mask, y_indices)
 
 def t_acc_grad_loss2(acc_grads, params, y, y_mask, y_indices):
-    p_gen_aux = sample_p_gen_aux(params)
-    grad_loss_fn = partial(t_loss_bkwd2, train=True, p_gen_aux=p_gen_aux)
-    return _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices)
+    return _acc_grad_loss(t_loss_bkwd2, acc_grads, params, y, y_mask, y_indices)
 
 def t_acc_grad_loss3(acc_grads, params, y, y_mask, y_indices):
-    p_gen_aux = sample_p_gen_aux(params)
-    grad_loss_fn = partial(t_loss_bkwd3, train=True, p_gen_aux=p_gen_aux)
-    return _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices)
+    return _acc_grad_loss(t_loss_bkwd3, acc_grads, params, y, y_mask, y_indices)
+
+def t_acc_grad_loss3_t(acc_grads, params, y, y_mask, y_indices):
+    return _acc_grad_loss(t_loss_bkwd3_t, acc_grads, params, y, y_mask, y_indices)
 
 
 def _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices):
-    i_step_grads, grad_loss_rest = grad_loss_fn(params, y, y_mask, y_indices)
+    i_step_grads, grad_loss_rest = grad_loss_fn(params, y, y_mask, y_indices, train=True, p_gen_aux=sample_p_gen_aux(params))
     
     for grp_i in range(len(acc_grads)):
         for p_i in range(len(acc_grads[grp_i])):
