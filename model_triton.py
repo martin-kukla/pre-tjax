@@ -518,6 +518,15 @@ def t_softmax_attn_fwd(q, k, mask, train, p_gen_aux=None):
     sa = t_dropout_fwd(sa, train, p_gen_aux)
     return sa
 
+def t_softmax_attn_fwd_t(q, k, mask, train, p_gen_aux=None):
+    D = q.shape[-1]
+    attn = torch.matmul(q, torch.transpose(k, -2, -1))
+    attn = attn / math.sqrt(D)
+    attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
+    sa = torch.exp(t_log_softmax_fwd_t(attn))
+    sa = t_dropout_fwd_t(sa, train, p_gen_aux)
+    return sa
+
 def t_softmax_attn_bkwd(q, k, mask, train, p_gen_aux=None):
     D = q.shape[-1]
     attn = torch.matmul(q, torch.transpose(k, -2, -1))
@@ -577,6 +586,11 @@ def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True, p_gen_aux=None): # inputs:
 def t_scaled_dot_prod_attn_fwd3(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
     softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train, p_gen_aux)
+    return torch.matmul(softmaxed_attn, v), [softmaxed_attn] # output: BS x H x N x D
+
+def t_scaled_dot_prod_attn_fwd3_t(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
+    q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
+    softmaxed_attn = t_softmax_attn_fwd_t(q, k, mask, train, p_gen_aux)
     return torch.matmul(softmaxed_attn, v), [softmaxed_attn] # output: BS x H x N x D
 
 def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
@@ -670,6 +684,12 @@ def t_tlayer_attn_heads_fwd3(layer_params, qkv, mask, train, p_gen_aux=None): # 
     proj_qkv = t_proj_fwd(layer_params, torch.unsqueeze(qkv, 1)) # batch_size x heads x 3 x seq_len x emb_dim
     return t_scaled_dot_prod_attn_fwd3(proj_qkv, mask, train, p_gen_aux)
 
+def t_tlayer_attn_heads_fwd3_t(layer_params, qkv, mask, train, p_gen_aux=None): # params: H x 3 x D/H x D, input: BS x N x D
+    qkv = torch.stack(qkv,dim=-3) # batch_size x 3 x seq_len x emb_dim
+    
+    proj_qkv = t_proj_fwd(layer_params, torch.unsqueeze(qkv, 1)) # batch_size x heads x 3 x seq_len x emb_dim
+    return t_scaled_dot_prod_attn_fwd3_t(proj_qkv, mask, train, p_gen_aux)
+
 def t_tlayer_attn_heads_bkwd_p(layer_params, qkv, mask, train, p_gen_aux=None): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
     qkv = torch.stack(qkv,dim=-3).unsqueeze(1)
     
@@ -748,6 +768,12 @@ def t_tlayer_attn_fwd(layer_params, qkv, mask, train, p_gen_aux=None): # input: 
 
 def t_tlayer_attn_fwd3(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
     heads_attns, acts = t_tlayer_attn_heads_fwd3(layer_params[0], qkv, mask, train, p_gen_aux)
+    BS, H, N, D = heads_attns.shape
+    attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
+    return t_proj_fwd(layer_params[-1], attn), [acts, heads_attns]
+
+def t_tlayer_attn_fwd3_t(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
+    heads_attns, acts = t_tlayer_attn_heads_fwd3_t(layer_params[0], qkv, mask, train, p_gen_aux)
     BS, H, N, D = heads_attns.shape
     attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
     return t_proj_fwd(layer_params[-1], attn), [acts, heads_attns]
@@ -1443,6 +1469,18 @@ def t_gpt2_tlayer_sublock1_fwd3(layer_params, y, mask, train=True, p_gen_aux=Non
     y = y + t_dropout_fwd(y_diff, train, p_gen_aux[1])
     return y, acts
 
+def t_gpt2_tlayer_sublock1_fwd3_t(layer_params, y, mask, train=True, p_gen_aux=None):
+    if not train:
+        p_gen_aux = [None, None]
+        
+    y_diff = t_layernorm_fwd_t(layer_params[:2], y)
+    y_diff1 = y_diff
+    y_diff, y_diff_acts = t_tlayer_attn_fwd3_t(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    acts = [(y_diff1, y_diff_acts)]
+    acts.append(y_diff)    
+    y = y + t_dropout_fwd_t(y_diff, train, p_gen_aux[1])
+    return y, acts
+
 def t_gpt2_tlayer_sublock1_bkwd_p(layer_params, y, mask, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     if not train:
         p_gen_aux = [None, None]
@@ -1581,6 +1619,19 @@ def t_gpt2_tlayer_sublock2_fwd3(layer_params, y, train=True, p_gen_aux=None):
     y = y + t_dropout_fwd(y_diff, train, p_gen_aux)
     return y, acts
 
+def t_gpt2_tlayer_sublock2_fwd3_t(layer_params, y, train=True, p_gen_aux=None):
+    y_diff = t_layernorm_fwd_t(layer_params[:-4], y)
+    acts = [y_diff]
+    y_diff = t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu_fwd_t)
+    acts.append(y_diff)
+    # TODO XXX XXX: The below line (i.e. with activation checkpointing) is not faster (due to reshapes?)
+    # Remember to stick to acts convention: each element of acts should represent single op's acts and input,
+    # so we should create a tuple of ("y_diff from above", ffn_acts) as first element of acts.
+    #y_diff, ffn_acts = t_tlayer_ffn_fwd3(layer_params[-4:], y_diff, t_gelu_fwd)
+    #acts.append((y_diff, ffn_acts))
+    y = y + t_dropout_fwd_t(y_diff, train, p_gen_aux)
+    return y, acts
+
 def t_gpt2_tlayer_sublock2_bkwd_p(layer_params, y, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     y_diff = t_layernorm_fwd(layer_params[:2], y)
     jac_layernorm_p = t_layernorm_bkwd_p(layer_params[:2], y)
@@ -1703,6 +1754,17 @@ def t_gpt2_tlayer_fwd3(layer_params, y, mask, train=True, p_gen_aux=None): # inp
     acts.append((sblck2_y, sblck2_acts))
     return y, acts
 
+def t_gpt2_tlayer_fwd3_t(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
+    if not train:
+        p_gen_aux = [None, None, None] 
+
+    y, sblck1_acts = t_gpt2_tlayer_sublock1_fwd3_t(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    acts = [sblck1_acts]
+    sblck2_y = y
+    y, sblck2_acts = t_gpt2_tlayer_sublock2_fwd3_t(layer_params[-6:], y, train, p_gen_aux[2])
+    acts.append((sblck2_y, sblck2_acts))
+    return y, acts
+
 def t_gpt2_tlayer_bkwd_p(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
     if not train:
         p_gen_aux = [None, None, None] 
@@ -1799,6 +1861,25 @@ def t_gpt2_tlayers_fwd3(params, y, mask, indices, train=True, p_gen_aux=None): #
         acts.append([layer_input, layer_acts])
     acts.append(y)
     y = t_layernorm_fwd(params[-1], y)
+
+    return y, acts
+
+def t_gpt2_tlayers_fwd3_t(params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
+    if not train: # as there are 3 dropouts per tlayer
+        p_gen_aux = [None] + [None] * 3 * (len(params) - 3)
+    
+    y = t_embed_fwd(params[0], y)
+    y = y + params[1][0]
+    acts = [y]
+    y = t_dropout_fwd_t(y, train, p_gen_aux[0])
+    
+    for i, layer_params in enumerate(params[2:-1]):
+        layer_p_gen_aux = p_gen_aux[1+i*3:1+(i+1)*3]
+        layer_input = y
+        y, layer_acts = t_gpt2_tlayer_fwd3_t(layer_params, y, mask, train, layer_p_gen_aux)
+        acts.append([layer_input, layer_acts])
+    acts.append(y)
+    y = t_layernorm_fwd_t(params[-1], y)
 
     return y, acts
 
@@ -1946,6 +2027,12 @@ def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input
 
 def t_gpt2_forward_with_acts(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
     y, acts = t_gpt2_tlayers_fwd3(params, y, y_mask, y_indices, train, p_gen_aux)
+    y1 = y
+    y = t_linear_fwd(params[0], y) 
+    return y, [acts, y1]
+
+def t_gpt2_forward_with_acts_t(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
+    y, acts = t_gpt2_tlayers_fwd3_t(params, y, y_mask, y_indices, train, p_gen_aux)
     y1 = y
     y = t_linear_fwd(params[0], y) 
     return y, [acts, y1]

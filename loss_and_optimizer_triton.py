@@ -15,7 +15,7 @@ import triton
 import triton.language as tl
 from torch.func import grad
 from model_torch_func import log_softmax, batched_forward_gpt2
-from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_log_softmax_bkwd2, t_batched_forward_gpt2, t_gpt2_forward, t_gpt2_forward_with_acts, t_gpt2_bkwd_p, t_gpt2_bkwd2_p, t_gpt2_bkwd3_p, _mult_jacs_in_2d
+from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_log_softmax_bkwd2, t_batched_forward_gpt2, t_gpt2_forward, t_gpt2_forward_with_acts, t_gpt2_forward_with_acts_t, t_gpt2_bkwd_p, t_gpt2_bkwd2_p, t_gpt2_bkwd3_p, _mult_jacs_in_2d
 
 def avg_cross_entropy_loss(y_labels, x_logits):
     return _avg_cross_entropy_loss(log_softmax, y_labels, x_logits)
@@ -282,7 +282,7 @@ def t_loss_bkwd3_t(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inpu
     y_in = y[:, :-1]
     y_out = y[:, 1:]
      
-    logits, acts = t_gpt2_forward_with_acts(params, y_in, y_mask, y_indices, train, p_gen_aux) 
+    logits, acts = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, train, p_gen_aux) 
     
     loss_val, tokens_count, dloss_dx = t_avg_cross_entropy_loss_bkwd3_t(y_out, logits)
     dloss_dx = t_gpt2_bkwd3_p(dloss_dx, acts, params, y_in, y_mask, y_indices, train, p_gen_aux)
