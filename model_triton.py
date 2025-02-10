@@ -614,7 +614,6 @@ def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True, p_gen_aux=None): # inputs:
 
 # WIP:
 # 1) Assumes N, D are both relatively small, so we don't need to do any tiling for now
-# 2) Assumes N==D
 @triton.jit
 def t_scaled_dot_prod_attn_fwd_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr,
                 q_stride0, q_stride1, q_stride2, k_t_stride0, k_t_stride1, k_t_stride2,
@@ -647,10 +646,12 @@ def t_scaled_dot_prod_attn_fwd_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr,
         d_offsets_mod = d_offsets %D
 
         # Q * K^T
-        q_blck_ptr = step_q_ptr + n_offsets_mod[:,None] * q_stride1 + d_offsets[None, :] * q_stride2
-        q_blck = tl.load(q_blck_ptr, mask=d_offsets[None, :] < D, other=0.0) 
-        k_blck_ptr = step_k_t_ptr + d_offsets[:,None] * k_t_stride1 + n_offsets_mod[None, :] * k_t_stride2
-        k_blck = tl.load(k_blck_ptr, mask=d_offsets[:, None] < D, other=0.0)
+        q_blck_ptr = step_q_ptr + n_offsets_mod[:,None] * q_stride1 + d_offsets_mod[None, :] * q_stride2
+        q_blck_mask = (n_offsets[:,None] < N) & (d_offsets[None, :] < D)
+        q_blck = tl.load(q_blck_ptr, mask=q_blck_mask, other=0.0) 
+        k_blck_ptr = step_k_t_ptr + d_offsets_mod[:,None] * k_t_stride1 + n_offsets_mod[None, :] * k_t_stride2
+        k_blck_mask = (d_offsets[:, None] < D) & (n_offsets[None, :] < N)
+        k_blck = tl.load(k_blck_ptr, mask=k_blck_mask, other=0.0)
         # Matching PyTorch's fp32 dtype ( see https://github.com/triton-lang/triton/issues/4574)
         q_blck = tl.inline_asm_elementwise(ASM, "=r, r", [q_blck], dtype=tl.float32, is_pure=True, pack=1)
         k_blck = tl.inline_asm_elementwise(ASM, "=r, r", [k_blck], dtype=tl.float32, is_pure=True, pack=1)
@@ -658,8 +659,8 @@ def t_scaled_dot_prod_attn_fwd_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr,
 
         # "sqrt(D)" + Mask + Softmax + Dropout
         acc = acc / tl.sqrt(D.to(tl.float32))
-        mask_blck_ptr = mask_ptr + n_offsets_mod[:,None] * mask_stride0 + d_offsets[None, :] * mask_stride1
-        mask_mask = (n_offsets[:,None] <N) & (d_offsets[None, :]<D)
+        mask_blck_ptr = mask_ptr + n_offsets_mod[:,None] * mask_stride0 + n_offsets_mod[None, :] * mask_stride1
+        mask_mask = (n_offsets[:,None] <N) & (n_offsets[None, :]<N)
         mask_blck = tl.load(mask_blck_ptr, mask=mask_mask, other= 0.0)
         acc = tl.where(mask_blck, acc, -1e9)
         acc_minus_max = acc - tl.max(acc, axis=1, keep_dims=True)   
@@ -667,11 +668,12 @@ def t_scaled_dot_prod_attn_fwd_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr,
         denominator = tl.sum(nominator, axis=1, keep_dims=True)
         acc = nominator/denominator
         # TODO T: confirm that this is different enough seed per row (assumes that D_PID always equals to 0)
-        acc = dropout_k(acc, train, p_gen_aux+bs_h_pid, n_offsets[:,None] + d_offsets[None, :])
-
+        acc = dropout_k(acc, train, p_gen_aux+bs_h_pid, n_offsets[:,None] + n_offsets[None, :])
+        
         # * V
-        v_blck_ptr = step_v_ptr + n_offsets_mod[:,None] * v_stride1 + d_offsets[None, :] * v_stride2
-        v_blck = tl.load(v_blck_ptr, mask=n_offsets[None, :] < N, other=0.0)
+        v_blck_ptr = step_v_ptr + n_offsets_mod[:,None] * v_stride1 + d_offsets_mod[None, :] * v_stride2
+        v_blck_mask = (n_offsets[:, None] < N) & (d_offsets[None, :]<D)
+        v_blck = tl.load(v_blck_ptr, mask=v_blck_mask, other=0.0)
         v_blck = tl.inline_asm_elementwise(ASM, "=r, r", [v_blck], dtype=tl.float32, is_pure=True, pack=1)
         acc = tl.dot(acc, v_blck)
 
