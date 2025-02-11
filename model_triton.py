@@ -734,6 +734,8 @@ def t_scaled_dot_prod_attn_fwd_t(qkv:torch.Tensor, mask:torch.Tensor, train=True
     BLOCK_SIZE_K_T_N = 64
     BLOCK_SIZE_D = triton.next_power_of_2(D)
 
+    if not train:
+        p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
     k_t = torch.transpose(k, -2, -1)
     t_scaled_dot_prod_attn_fwd_k[grid](
         q, k_t, v, mask, output,
