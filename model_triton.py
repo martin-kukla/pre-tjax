@@ -612,9 +612,10 @@ def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True, p_gen_aux=None): # inputs:
     softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train, p_gen_aux)
     return torch.matmul(softmaxed_attn, v) # output: BS x H x N x D
 
-# This will work for moderate size of D: it's tiling along N dimension of Q, and along N dimension of K_T.
+# This will work for moderate size of D: it's tiling along N dimension of Q, and along N dimension of K_T&V.
 # It doesn't tile along D dimension.
 # Different program per BS_H item (reshape of BS and H in one dim, and one program per this dim)
+# TODO T: rewrite, so outer loop should iterate over N dimension of K_T&V, and inner loop should iterate over N dimension of Q. This will give speedups
 @triton.jit
 def t_scaled_dot_prod_attn_fwd_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr,
                 q_stride0, q_stride1, q_stride2, k_t_stride0, k_t_stride1, k_t_stride2,
