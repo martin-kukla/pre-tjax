@@ -862,8 +862,8 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, mask_ptr
             q_blck = tl.load(q_blck_ptr, mask=q_blck_mask, other=0.0)
 
             # First pass for softmax of "Q * K^T / sqrt(D) + Mask": get row-wise logits' max & sumexp (denominator)
-            acc_max = tl.full((BLOCK_SIZE_Q_N,1), -1e9, tl.float32)
-            acc_logits_sumexp = tl.zeros_like(acc_max)
+            attn_max = tl.full((BLOCK_SIZE_Q_N,1), -1e9, tl.float32)
+            attn_logits_sumexp = tl.zeros_like(attn_max)
             for k_t_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_K_T_N)):
                 k_t_n_offsets = k_t_n_step * BLOCK_SIZE_K_T_N + tl.arange(0, BLOCK_SIZE_K_T_N) 
                 k_t_n_offsets_mod = k_t_n_offsets % N
@@ -875,18 +875,18 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, mask_ptr
                 # Matching PyTorch's fp32 dtype ( see https://github.com/triton-lang/triton/issues/4574)
                 q_blck = tl.inline_asm_elementwise(ASM, "=r, r", [q_blck], dtype=tl.float32, is_pure=True, pack=1)
                 k_blck = tl.inline_asm_elementwise(ASM, "=r, r", [k_blck], dtype=tl.float32, is_pure=True, pack=1)
-                acc = tl.dot(q_blck, k_blck)
+                attn = tl.dot(q_blck, k_blck)
 
                 # /sqrt(D) + Mask + "half" of Softmax
-                acc = acc / sqrt_D
+                attn = attn / sqrt_D
                 mask_blck_ptr = mask_ptr + q_n_offsets_mod[:,None] * mask_stride0 + k_t_n_offsets_mod[None, :] * mask_stride1
                 mask_mask = (q_n_offsets[:,None] <N) & (k_t_n_offsets[None, :]<N)
                 mask_blck = tl.load(mask_blck_ptr, mask=mask_mask, other=0.0)
-                acc = tl.where(mask_blck, acc, -1e9)
-                blck_acc_max = tl.max(acc, axis=1, keep_dims=True)
-                n_acc_max = tl.maximum(acc_max, blck_acc_max)
-                acc_logits_sumexp = acc_logits_sumexp * tl.exp(acc_max - n_acc_max) + tl.sum(tl.exp(acc - n_acc_max), axis=1, keep_dims=True)
-                acc_max = n_acc_max
+                attn = tl.where(mask_blck, attn, -1e9)
+                blck_attn_max = tl.max(attn, axis=1, keep_dims=True)
+                n_attn_max = tl.maximum(attn_max, blck_attn_max)
+                attn_logits_sumexp = attn_logits_sumexp * tl.exp(attn_max - n_attn_max) + tl.sum(tl.exp(attn - n_attn_max), axis=1, keep_dims=True)
+                attn_max = n_attn_max
             
             # Second pass for softmax of "Q * K^T / sqrt(D) + Mask"
             for k_t_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_K_T_N)):
@@ -900,19 +900,19 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, mask_ptr
                 # Matching PyTorch's fp32 dtype ( see https://github.com/triton-lang/triton/issues/4574)
                 q_blck = tl.inline_asm_elementwise(ASM, "=r, r", [q_blck], dtype=tl.float32, is_pure=True, pack=1)
                 k_blck = tl.inline_asm_elementwise(ASM, "=r, r", [k_blck], dtype=tl.float32, is_pure=True, pack=1)
-                acc = tl.dot(q_blck, k_blck)
+                attn = tl.dot(q_blck, k_blck)
 
                 # /sqrt(D) + Mask + Softmax + Dropout
-                acc = acc / sqrt_D
+                attn = attn / sqrt_D
                 mask_blck_ptr = mask_ptr + q_n_offsets_mod[:,None] * mask_stride0 + k_t_n_offsets_mod[None, :] * mask_stride1
                 mask_mask = (q_n_offsets[:,None] <N) & (k_t_n_offsets[None, :]<N)
                 mask_blck = tl.load(mask_blck_ptr, mask=mask_mask, other= 0.0)
-                acc = tl.where(mask_blck, acc, -1e9)
-                acc_minus_max = acc - acc_max
-                nominator = tl.exp(acc_minus_max)
-                acc = nominator/acc_logits_sumexp
+                attn = tl.where(mask_blck, attn, -1e9)
+                attn_minus_max = attn - attn_max
+                nominator = tl.exp(attn_minus_max)
+                sa_pre_dropout = nominator/attn_logits_sumexp
                 # TODO T: confirm that this is different enough seed per row (assumes that D_PID always equals to 0)
-                acc = dropout_k(acc, train, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
+                sa = dropout_k(sa_pre_dropout, train, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
                 
                 # Propagate back
                 dloss_dx_blck_ptr = bs_h_dloss_dx_ptr + q_n_offsets_mod[:,None] * dloss_dx_stride1 + d_offsets_mod[None, :] * dloss_dx_stride2
@@ -920,12 +920,20 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, mask_ptr
                 dloss_dx_blck = tl.load(dloss_dx_blck_ptr, mask=dloss_dx_blck_mask, other=0.0)
                 dloss_dx_blck = tl.inline_asm_elementwise(ASM, "=r, r", [dloss_dx_blck], dtype=tl.float32, is_pure=True, pack=1)
                 
-                # Compute dloss_dv=torch.einsum(f'cd, ce -> ed', dloss_dx, sa), dloss_dx is Q_N x D, acc(sa) is Q_N x K_T_N
-                acc = tl.trans(tl.dot(tl.trans(dloss_dx_blck), acc)) # TODO T: get rid of transposes
-                
+                # dloss_dv=torch.einsum(f'cd, ce -> ed', dloss_dx, sa), dloss_dx is Q_N x D, sa is Q_N x K_T_N
+                dloss_dv_blck = tl.trans(tl.dot(tl.trans(dloss_dx_blck), sa)) # TODO T: get rid of transposes                
                 dloss_dv_blck_ptr = bs_h_dloss_dv_ptr + k_t_n_offsets[:,None] * dloss_dv_stride1 + d_offsets[None, :] * dloss_dv_stride2
                 dloss_dv_mask = (k_t_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
-                tl.atomic_add(dloss_dv_blck_ptr, acc, mask=dloss_dv_mask)
+                tl.atomic_add(dloss_dv_blck_ptr, dloss_dv_blck, mask=dloss_dv_mask)
+                
+                # * V
+#                 v_blck_ptr = bs_h_v_ptr + k_t_n_offsets_mod[:,None] * v_stride1 + d_offsets_mod[None, :] * v_stride2
+#                 v_blck_mask = (k_t_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
+#                 v_blck = tl.load(v_blck_ptr, mask=v_blck_mask, other=0.0)
+#                 v_blck = tl.inline_asm_elementwise(ASM, "=r, r", [v_blck], dtype=tl.float32, is_pure=True, pack=1)
+#                 dloss_dx_blck = tl.dot(dloss_dx_blck, v_blck)
+                
+                
 
 def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torch.Tensor, train=True, p_gen_aux=None):
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
