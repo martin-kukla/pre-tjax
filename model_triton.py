@@ -926,14 +926,19 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, mask_ptr
                 dloss_dv_mask = (k_t_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
                 tl.atomic_add(dloss_dv_blck_ptr, dloss_dv_blck, mask=dloss_dv_mask)
                 
-                # * V
-#                 v_blck_ptr = bs_h_v_ptr + k_t_n_offsets_mod[:,None] * v_stride1 + d_offsets_mod[None, :] * v_stride2
-#                 v_blck_mask = (k_t_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
-#                 v_blck = tl.load(v_blck_ptr, mask=v_blck_mask, other=0.0)
-#                 v_blck = tl.inline_asm_elementwise(ASM, "=r, r", [v_blck], dtype=tl.float32, is_pure=True, pack=1)
-#                 dloss_dx_blck = tl.dot(dloss_dx_blck, v_blck)
-                
-                
+                # dloss_dx = torch.einsum(f'cd, ed -> ce', dloss_dx, v)
+                v_blck_ptr = bs_h_v_ptr + k_t_n_offsets_mod[:,None] * v_stride1 + d_offsets_mod[None, :] * v_stride2
+                v_blck_mask = (k_t_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
+                v_blck = tl.load(v_blck_ptr, mask=v_blck_mask, other=0.0)
+                v_blck = tl.inline_asm_elementwise(ASM, "=r, r", [v_blck], dtype=tl.float32, is_pure=True, pack=1)
+                dloss_dx_blck = tl.dot(dloss_dx_blck, tl.trans(v_blck))
+                dloss_dx_blck = dropout_bkwd2_k(dloss_dx_blck, train, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
+                dloss_dx_blck = dloss_dx_blck * sa_pre_dropout
+                # TODO T: dloss_dx = t_log_softmax_bkwd2_t(dloss_dx, attn)
+                dloss_dx_blck = tl.where(mask_blck, dloss_dx_blck, -1e9)
+                # TODO T: dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
+                # TODO T: dloss_dk = torch.einsum('abcd, abce->abde', dloss_dx/math.sqrt(D), q)
+                # TODO T: save dloss_dq, dloss_dk to HBM
 
 def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torch.Tensor, train=True, p_gen_aux=None):
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
@@ -977,7 +982,7 @@ def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torc
         BLOCK_SIZE_Q_N=BLOCK_SIZE_Q_N, BLOCK_SIZE_K_T_N = BLOCK_SIZE_K_T_N, BLOCK_SIZE_D=BLOCK_SIZE_D,
         num_warps=num_warps, num_stages=num_stages)
     
-    return _, _, dloss_dv.reshape(BS, H, N, D)
+    return dloss_dq.reshape(BS, H, N, D), dloss_dk.reshape(BS, H, N, D), dloss_dv.reshape(BS, H, N, D)
 
 # TODO XXX: Remove below
 # TODO XXX: Support for heads>1
