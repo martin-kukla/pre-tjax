@@ -1505,6 +1505,16 @@ def t_dropout_bkwd2(dloss_dx, x, train=True, p_gen_aux=None):
     mask = torch.bernoulli(torch.full_like(x, 1-DROPOUT_RATE), generator=generator) 
     return dloss_dx * mask
 
+@triton.jit
+def dropout_bkwd2_k(dloss_dx, train, p_gen_aux, offsets):
+    if train:
+        random = tl.rand(p_gen_aux, offsets) # TODO T: Is this enough as diff seed per row?
+        x_mask = random>T_DROPOUT_RATE
+        output = tl.where(x_mask, dloss_dx, 0.0)  
+    else:
+        output = dloss_dx * (1-T_DROPOUT_RATE)
+    return output
+    
 # Note that the kernel assumes that n_cols < BLOCK_SIZE
 @triton.jit
 def t_dropout_bkwd2_k(dloss_dx_ptr,
@@ -1525,12 +1535,7 @@ def t_dropout_bkwd2_k(dloss_dx_ptr,
         offsets = tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_cols
         dloss_dx = tl.load(dloss_dx_row_start_ptr + offsets, mask=mask, other=0.0)
-        if train:
-            random = tl.rand(p_gen_aux+row_idx, offsets) # TODO T: Is this enough as diff seed per row?
-            x_mask = random>T_DROPOUT_RATE
-            output = tl.where(x_mask, dloss_dx, 0.0)  
-        else:
-            output = dloss_dx * (1-T_DROPOUT_RATE)
+        output = dropout_bkwd2_k(dloss_dx, train, p_gen_aux+row_idx, offsets)
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
     
