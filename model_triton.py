@@ -678,6 +678,7 @@ def t_scaled_dot_prod_attn_fwd_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr,
                 acc_max = n_acc_max
             
             # Second pass for softmax of "Q * K^T / sqrt(D) + Mask"
+            output = tl.zeros((BLOCK_SIZE_Q_N, BLOCK_SIZE_D), dtype=tl.float32)
             for k_t_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_K_T_N)):
                 k_t_n_offsets = k_t_n_step * BLOCK_SIZE_K_T_N + tl.arange(0, BLOCK_SIZE_K_T_N) 
                 k_t_n_offsets_mod = k_t_n_offsets % N
@@ -708,11 +709,10 @@ def t_scaled_dot_prod_attn_fwd_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr,
                 v_blck_mask = (k_t_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
                 v_blck = tl.load(v_blck_ptr, mask=v_blck_mask, other=0.0)
                 v_blck = tl.inline_asm_elementwise(ASM, "=r, r", [v_blck], dtype=tl.float32, is_pure=True, pack=1)
-                acc = tl.dot(acc, v_blck)
-
-                output_blck_ptr = bs_h_output_ptr + q_n_offsets[:,None] * output_stride1 + d_offsets[None, :] * output_stride2
-                output_mask = (q_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
-                tl.atomic_add(output_blck_ptr, acc, mask=output_mask)
+                output = tl.dot(acc, v_blck, output)
+            output_blck_ptr = bs_h_output_ptr + q_n_offsets[:,None] * output_stride1 + d_offsets[None, :] * output_stride2
+            output_mask = (q_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
+            tl.atomic_add(output_blck_ptr, output, mask=output_mask)
 
 def t_scaled_dot_prod_attn_fwd_t(qkv:torch.Tensor, mask:torch.Tensor, train=True, p_gen_aux=None):
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
