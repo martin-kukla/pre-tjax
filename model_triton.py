@@ -892,8 +892,8 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
             output_blck = tl.inline_asm_elementwise(ASM, "=r, r", [output_blck], dtype=tl.float32, is_pure=True, pack=1)
             rowise_dloss_dx_output_sum = tl.sum(input_dloss_dx_blck * output_blck, axis=1, keep_dims=True)
                 
-                
             # Compute softmax of "Q * K^T / sqrt(D) + Mask", and backpropagate
+            dloss_dq_blck = tl.zeros((BLOCK_SIZE_Q_N, BLOCK_SIZE_D), dtype=tl.float32)
             for k_t_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_K_T_N)):
                 k_t_n_offsets = k_t_n_step * BLOCK_SIZE_K_T_N + tl.arange(0, BLOCK_SIZE_K_T_N) 
                 k_t_n_offsets_mod = k_t_n_offsets % N
@@ -936,15 +936,15 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
                 dloss_dx_blck += rowise_dloss_dx_output_sum * -nominator/attn_logits_sumexp
                 dloss_dx_blck = tl.where(mask_blck, dloss_dx_blck, 0) # Q_N x K_T_N
                 # dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
-                dloss_dq_blck = tl.dot(dloss_dx_blck, tl.trans(k_blck)/sqrt_D) # TODO T: rename k_blck into k_t_blck!!
-                dloss_dq_blck_ptr = bs_h_dloss_dq_ptr + q_n_offsets[:,None] * dloss_dq_stride1 + d_offsets[None, :] * dloss_dq_stride2
-                dloss_dq_mask = (q_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
-                tl.atomic_add(dloss_dq_blck_ptr, dloss_dq_blck, mask=dloss_dq_mask) # TODO T: can we just do save instead??
+                dloss_dq_blck = tl.dot(dloss_dx_blck, tl.trans(k_blck)/sqrt_D, dloss_dq_blck) # TODO T: rename k_blck into k_t_blck!
                 # dloss_dk = torch.einsum('abcd, abce->abde', dloss_dx/math.sqrt(D), q)
                 dloss_dk_blck = tl.dot(tl.trans(dloss_dx_blck)/sqrt_D, q_blck)
                 dloss_dk_blck_ptr = bs_h_dloss_dk_ptr + k_t_n_offsets[:,None] * dloss_dk_stride1 + d_offsets[None, :] * dloss_dk_stride2                
                 dloss_dk_mask = (k_t_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
                 tl.atomic_add(dloss_dk_blck_ptr, dloss_dk_blck, mask=dloss_dk_mask) # TODO T: can we just do save instead??
+            dloss_dq_blck_ptr = bs_h_dloss_dq_ptr + q_n_offsets[:,None] * dloss_dq_stride1 + d_offsets[None, :] * dloss_dq_stride2
+            dloss_dq_mask = (q_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
+            tl.store(dloss_dq_blck_ptr, dloss_dq_blck, mask=dloss_dq_mask)
 
 def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torch.Tensor, train=True, p_gen_aux=None):
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
