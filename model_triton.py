@@ -912,9 +912,9 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, mask_ptr
                 attn = tl.where(mask_blck, attn, -1e9)
                 attn_minus_max = attn - attn_max
                 nominator = tl.exp(attn_minus_max)
-                sa_pre_dropout = nominator/attn_logits_sumexp
+                sa = nominator/attn_logits_sumexp
                 # TODO T: confirm that this is different enough seed per row (assumes that D_PID always equals to 0)
-                sa = dropout_k(sa_pre_dropout, train, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
+                sa = dropout_k(sa, train, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
                 
                 # Propagate back
                 dloss_dx_blck_ptr = bs_h_dloss_dx_ptr + q_n_offsets_mod[:,None] * dloss_dx_stride1 + d_offsets_mod[None, :] * dloss_dx_stride2
@@ -933,9 +933,8 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, mask_ptr
                 v_blck_mask = (k_t_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
                 v_blck = tl.load(v_blck_ptr, mask=v_blck_mask, other=0.0)
                 v_blck = tl.inline_asm_elementwise(ASM, "=r, r", [v_blck], dtype=tl.float32, is_pure=True, pack=1)
-                dloss_dx_blck = tl.dot(dloss_dx_blck, tl.trans(v_blck))
-                dloss_dx_blck = dropout_bkwd2_k(dloss_dx_blck, train, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
-                dloss_dx_blck = dloss_dx_blck * sa_pre_dropout                
+                dloss_dx_blck = tl.dot(dloss_dx_blck, tl.trans(v_blck)) 
+                dloss_dx_blck = dloss_dx_blck * sa
                 # dloss_dx = t_log_softmax_bkwd2_t(dloss_dx, attn)
                 dloss_dx_blck += tl.sum(dloss_dx_blck, axis=1, keep_dims=True) * -nominator/attn_logits_sumexp # BUG: SUM is inocrrect is tilling along K_T_N
                 dloss_dx_blck = tl.where(mask_blck, dloss_dx_blck, 0) # Q_N x K_T_N
