@@ -823,11 +823,11 @@ def t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv, mask, train=True, p_gen_
 # It doesn't tile along D dimension.
 # Different program per BS_H item (reshape of BS and H in one dim, and one program per this dim)
 @triton.jit
-def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, mask_ptr, 
+def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_ptr, mask_ptr, 
                 dloss_dq_ptr, dloss_dk_ptr, dloss_dv_ptr,
                 dloss_dx_stride0, dloss_dx_stride1, dloss_dx_stride2,
                 q_stride0, q_stride1, q_stride2, k_t_stride0, k_t_stride1, k_t_stride2,
-                v_stride0, v_stride1, v_stride2, mask_stride0, mask_stride1,
+                v_stride0, v_stride1, v_stride2, output_stride0, output_stride1, output_stride2, mask_stride0, mask_stride1,
                 dloss_dq_stride0, dloss_dq_stride1, dloss_dq_stride2,                                                                      
                 dloss_dk_stride0, dloss_dk_stride1, dloss_dk_stride2,                                   
                 dloss_dv_stride0, dloss_dv_stride1, dloss_dv_stride2,
@@ -847,6 +847,7 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, mask_ptr
         bs_h_q_ptr = q_ptr + bs_h_pid * q_stride0
         bs_h_k_t_ptr = k_t_ptr + bs_h_pid * k_t_stride0    
         bs_h_v_ptr = v_ptr + bs_h_pid * v_stride0        
+        bs_h_output_ptr = output_ptr + bs_h_pid * output_stride0        
         bs_h_dloss_dq_ptr = dloss_dq_ptr + bs_h_pid * dloss_dq_stride0
         bs_h_dloss_dk_ptr = dloss_dk_ptr + bs_h_pid * dloss_dk_stride0
         bs_h_dloss_dv_ptr = dloss_dv_ptr + bs_h_pid * dloss_dv_stride0
@@ -890,6 +891,20 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, mask_ptr
                 attn_logits_sumexp = attn_logits_sumexp * tl.exp(attn_max - n_attn_max) + tl.sum(tl.exp(attn - n_attn_max), axis=1, keep_dims=True)
                 attn_max = n_attn_max
             
+            # Precompute row-wise sum of dloss_dx * output
+            tmp_dloss_dx_blck_ptr = bs_h_dloss_dx_ptr + q_n_offsets_mod[:,None] * dloss_dx_stride1 + d_offsets_mod[None, :] * dloss_dx_stride2
+            tmp_dloss_dx_blck_mask = (q_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
+            tmp_dloss_dx_blck = tl.load(tmp_dloss_dx_blck_ptr, mask=tmp_dloss_dx_blck_mask, other=0.0)
+            tmp_dloss_dx_blck = tl.inline_asm_elementwise(ASM, "=r, r", [tmp_dloss_dx_blck], dtype=tl.float32, is_pure=True, pack=1)
+            output_blck_ptr = bs_h_output_ptr + q_n_offsets_mod[:,None] * output_stride1 + d_offsets_mod[None, :] * output_stride2
+            output_blck_ptr = bs_h_output_ptr + q_n_offsets_mod[:,None] * output_stride1 + d_offsets_mod[None, :] * output_stride2
+            output_blck_mask = (q_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
+            output_blck = tl.load(output_blck_ptr, mask=output_blck_mask, other=0.0)
+            output_blck = tl.inline_asm_elementwise(ASM, "=r, r", [output_blck], dtype=tl.float32, is_pure=True, pack=1)
+            dloss_dx_output_blck = tmp_dloss_dx_blck * output_blck     
+            rowise_dloss_dx_output_sum = tl.sum(dloss_dx_output_blck, axis=1, keep_dims=True)
+                
+                
             # Second pass for softmax of "Q * K^T / sqrt(D) + Mask"
             for k_t_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_K_T_N)):
                 k_t_n_offsets = k_t_n_step * BLOCK_SIZE_K_T_N + tl.arange(0, BLOCK_SIZE_K_T_N) 
@@ -936,7 +951,8 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, mask_ptr
                 dloss_dx_blck = tl.dot(dloss_dx_blck, tl.trans(v_blck)) 
                 dloss_dx_blck = dloss_dx_blck * sa
                 # dloss_dx = t_log_softmax_bkwd2_t(dloss_dx, attn)
-                dloss_dx_blck += tl.sum(dloss_dx_blck, axis=1, keep_dims=True) * -nominator/attn_logits_sumexp # BUG: SUM is inocrrect is tilling along K_T_N
+                #dloss_dx_blck += tl.sum(dloss_dx_blck, axis=1, keep_dims=True) * -nominator/attn_logits_sumexp # BUG: SUM is inocrrect is tilling along K_T_N
+                dloss_dx_blck += rowise_dloss_dx_output_sum * -nominator/attn_logits_sumexp
                 dloss_dx_blck = tl.where(mask_blck, dloss_dx_blck, 0) # Q_N x K_T_N
                 # dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
                 dloss_dq_blck = tl.dot(dloss_dx_blck, tl.trans(k_blck)/sqrt_D) # TODO T: rename k_blck into k_t_blck!!
@@ -958,6 +974,9 @@ def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torc
     k = k.reshape(BS*H, N, D)
     v = v.reshape(BS*H, N, D)
     mask = mask[0] # Asumme mask being the same across rows. TODO XXX: make that assumption throughput the code
+    output = acts[-1]
+    output = output.reshape(BS*H, N, D)
+    #v=output
     
     dloss_dq = torch.zeros_like(q)
     dloss_dk = torch.zeros_like(k)
@@ -977,11 +996,12 @@ def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torc
         p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
     k_t = torch.transpose(k, -2, -1)
     t_scaled_dot_prod_attn_bkwd3_k[grid](
-        dloss_dx, q, k_t, v, mask, 
+        dloss_dx, q, k_t, v, output, mask, 
         dloss_dq, dloss_dk, dloss_dv,
         dloss_dx.stride(0), dloss_dx.stride(1), dloss_dx.stride(2),
         q.stride(0), q.stride(1), q.stride(2), k_t.stride(0), k_t.stride(1), k_t.stride(2), 
         v.stride(0), v.stride(1), v.stride(2),
+        output.stride(0), output.stride(1), output.stride(2),        
         mask.stride(0), mask.stride(1), 
         dloss_dq.stride(0), dloss_dq.stride(1), dloss_dq.stride(2),        
         dloss_dk.stride(0), dloss_dk.stride(1), dloss_dk.stride(2),
