@@ -617,10 +617,10 @@ def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True, p_gen_aux=None): # inputs:
 # Different program per BS_H item (reshape of BS and H in one dim, and one program per this dim)
 # TODO T: rewrite, so outer loop should iterate over N dimension of K_T&V, and inner loop should iterate over N dimension of Q. This will give speedups
 @triton.jit
-def t_scaled_dot_prod_attn_fwd_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr,
+def t_scaled_dot_prod_attn_fwd_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, acts0_ptr, acts1_ptr,
                 q_stride0, q_stride1, q_stride2, k_t_stride0, k_t_stride1, k_t_stride2,
                 v_stride0, v_stride1, v_stride2, mask_stride0, mask_stride1,
-                output_stride0, output_stride1, output_stride2,
+                output_stride0, output_stride1, output_stride2, acts0_stride0, acts1_stride0,
                 train, p_gen_aux,
                 BS_H, N, D,
                 BLOCK_SIZE_Q_N: tl.constexpr, BLOCK_SIZE_K_T_N: tl.constexpr, BLOCK_SIZE_D: tl.constexpr,
@@ -637,6 +637,8 @@ def t_scaled_dot_prod_attn_fwd_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr,
         bs_h_k_t_ptr = k_t_ptr + bs_h_pid * k_t_stride0    
         bs_h_v_ptr = v_ptr + bs_h_pid * v_stride0        
         bs_h_output_ptr = output_ptr + bs_h_pid * output_stride0
+        bs_h_acts0_ptr = acts0_ptr + bs_h_pid * acts0_stride0
+        bs_h_acts1_ptr = acts1_ptr + bs_h_pid * acts1_stride0        
 
         for q_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_Q_N)):          
             q_n_offsets = q_n_step * BLOCK_SIZE_Q_N + tl.arange(0, BLOCK_SIZE_Q_N)            
@@ -676,6 +678,9 @@ def t_scaled_dot_prod_attn_fwd_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr,
                 n_acc_max = tl.maximum(acc_max, blck_acc_max)
                 acc_logits_sumexp = acc_logits_sumexp * tl.exp(acc_max - n_acc_max) + tl.sum(tl.exp(acc - n_acc_max), axis=1, keep_dims=True)
                 acc_max = n_acc_max
+            # Store logits's max + sumexp for backward pass
+            tl.store(bs_h_acts0_ptr + q_n_offsets_mod, acc_max.reshape(BLOCK_SIZE_Q_N), mask=q_n_offsets<N)
+            tl.store(bs_h_acts1_ptr + q_n_offsets_mod, acc_logits_sumexp.reshape(BLOCK_SIZE_Q_N), mask=q_n_offsets<N)            
             
             # Second pass for softmax of "Q * K^T / sqrt(D) + Mask"
             output = tl.zeros((BLOCK_SIZE_Q_N, BLOCK_SIZE_D), dtype=tl.float32)
@@ -724,6 +729,8 @@ def t_scaled_dot_prod_attn_fwd_t(qkv:torch.Tensor, mask:torch.Tensor, train=True
     mask = mask[0] # Asumme mask being the same across rows. TODO XXX: make that assumption throughput the code
     
     output = torch.zeros_like(q)
+    acts0 = torch.empty((BS*H, N), device=q.device)
+    acts1 = torch.empty_like(acts0)
     
     # TODO T: check if some matrices are contiguous?
     grid = (min(BS*H, 80),)
@@ -739,16 +746,17 @@ def t_scaled_dot_prod_attn_fwd_t(qkv:torch.Tensor, mask:torch.Tensor, train=True
         p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
     k_t = torch.transpose(k, -2, -1)
     t_scaled_dot_prod_attn_fwd_k[grid](
-        q, k_t, v, mask, output,
+        q, k_t, v, mask, output, acts0, acts1,
         q.stride(0), q.stride(1), q.stride(2), k_t.stride(0), k_t.stride(1), k_t.stride(2), 
         v.stride(0), v.stride(1), v.stride(2),
         mask.stride(0), mask.stride(1), output.stride(0), output.stride(1), output.stride(2),
+        acts0.stride(0), acts1.stride(0),
         train, p_gen_aux,
         BS*H, N, D,
         BLOCK_SIZE_Q_N=BLOCK_SIZE_Q_N, BLOCK_SIZE_K_T_N = BLOCK_SIZE_K_T_N, BLOCK_SIZE_D=BLOCK_SIZE_D,
         num_warps=num_warps, num_stages=num_stages)
     
-    return output.reshape(BS, H, N, D)
+    return output.reshape(BS, H, N, D), [acts0, acts1]
 
 def t_scaled_dot_prod_attn_fwd3(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
