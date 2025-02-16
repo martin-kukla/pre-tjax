@@ -617,7 +617,7 @@ def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True, p_gen_aux=None): # inputs:
 # Different program per BS_H item (reshape of BS and H in one dim, and one program per this dim)
 # TODO T: rewrite, so outer loop should iterate over N dimension of K_T&V, and inner loop should iterate over N dimension of Q. This will give speedups
 @triton.jit
-def t_scaled_dot_prod_attn_fwd_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, acts0_ptr, acts1_ptr,
+def t_scaled_dot_prod_attn_fwd3_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, acts0_ptr, acts1_ptr,
                 q_stride0, q_stride1, q_stride2, k_t_stride0, k_t_stride1, k_t_stride2,
                 v_stride0, v_stride1, v_stride2, mask_stride0, mask_stride1,
                 output_stride0, output_stride1, output_stride2, acts0_stride0, acts1_stride0,
@@ -719,7 +719,7 @@ def t_scaled_dot_prod_attn_fwd_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, ac
             output_mask = (q_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
             tl.atomic_add(output_blck_ptr, output, mask=output_mask)
 
-def t_scaled_dot_prod_attn_fwd_t(qkv:torch.Tensor, mask:torch.Tensor, train=True, p_gen_aux=None):
+def n_t_scaled_dot_prod_attn_fwd3_t(qkv:torch.Tensor, mask:torch.Tensor, train=True, p_gen_aux=None):
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
     BS, H, N, D = q.shape
     
@@ -745,7 +745,7 @@ def t_scaled_dot_prod_attn_fwd_t(qkv:torch.Tensor, mask:torch.Tensor, train=True
     if not train:
         p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
     k_t = torch.transpose(k, -2, -1)
-    t_scaled_dot_prod_attn_fwd_k[grid](
+    t_scaled_dot_prod_attn_fwd3_k[grid](
         q, k_t, v, mask, output, acts0, acts1,
         q.stride(0), q.stride(1), q.stride(2), k_t.stride(0), k_t.stride(1), k_t.stride(2), 
         v.stride(0), v.stride(1), v.stride(2),
@@ -756,7 +756,8 @@ def t_scaled_dot_prod_attn_fwd_t(qkv:torch.Tensor, mask:torch.Tensor, train=True
         BLOCK_SIZE_Q_N=BLOCK_SIZE_Q_N, BLOCK_SIZE_K_T_N = BLOCK_SIZE_K_T_N, BLOCK_SIZE_D=BLOCK_SIZE_D,
         num_warps=num_warps, num_stages=num_stages)
     
-    return output.reshape(BS, H, N, D), [acts0, acts1]
+    output = output.reshape(BS, H, N, D)
+    return output, [acts0.reshape(BS, H, N), acts1.reshape(BS, H, N), output]
 
 def t_scaled_dot_prod_attn_fwd3(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
