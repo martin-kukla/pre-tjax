@@ -818,7 +818,6 @@ def t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv, mask, train=True, p_gen_
     
     return dloss_dq, dloss_dk, dloss_dv
 
-# WIP: changing forward into backward
 # This will work for moderate size of D: it's tiling along N dimension of Q, and along N dimension of K_T.
 # It doesn't tile along D dimension.
 # Different program per BS_H item (reshape of BS and H in one dim, and one program per this dim)
@@ -892,20 +891,19 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
                 attn_max = n_attn_max
             
             # Precompute row-wise sum of dloss_dx * output
-            tmp_dloss_dx_blck_ptr = bs_h_dloss_dx_ptr + q_n_offsets_mod[:,None] * dloss_dx_stride1 + d_offsets_mod[None, :] * dloss_dx_stride2
-            tmp_dloss_dx_blck_mask = (q_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
-            tmp_dloss_dx_blck = tl.load(tmp_dloss_dx_blck_ptr, mask=tmp_dloss_dx_blck_mask, other=0.0)
-            tmp_dloss_dx_blck = tl.inline_asm_elementwise(ASM, "=r, r", [tmp_dloss_dx_blck], dtype=tl.float32, is_pure=True, pack=1)
+            dloss_dx_blck_ptr = bs_h_dloss_dx_ptr + q_n_offsets_mod[:,None] * dloss_dx_stride1 + d_offsets_mod[None, :] * dloss_dx_stride2
+            dloss_dx_blck_mask = (q_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
+            input_dloss_dx_blck = tl.load(dloss_dx_blck_ptr, mask=dloss_dx_blck_mask, other=0.0)
+            input_dloss_dx_blck = tl.inline_asm_elementwise(ASM, "=r, r", [input_dloss_dx_blck], dtype=tl.float32, is_pure=True, pack=1)
             output_blck_ptr = bs_h_output_ptr + q_n_offsets_mod[:,None] * output_stride1 + d_offsets_mod[None, :] * output_stride2
             output_blck_ptr = bs_h_output_ptr + q_n_offsets_mod[:,None] * output_stride1 + d_offsets_mod[None, :] * output_stride2
             output_blck_mask = (q_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
             output_blck = tl.load(output_blck_ptr, mask=output_blck_mask, other=0.0)
             output_blck = tl.inline_asm_elementwise(ASM, "=r, r", [output_blck], dtype=tl.float32, is_pure=True, pack=1)
-            dloss_dx_output_blck = tmp_dloss_dx_blck * output_blck     
-            rowise_dloss_dx_output_sum = tl.sum(dloss_dx_output_blck, axis=1, keep_dims=True)
+            rowise_dloss_dx_output_sum = tl.sum(input_dloss_dx_blck * output_blck, axis=1, keep_dims=True)
                 
                 
-            # Second pass for softmax of "Q * K^T / sqrt(D) + Mask"
+            # Third pass for softmax of "Q * K^T / sqrt(D) + Mask"
             for k_t_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_K_T_N)):
                 k_t_n_offsets = k_t_n_step * BLOCK_SIZE_K_T_N + tl.arange(0, BLOCK_SIZE_K_T_N) 
                 k_t_n_offsets_mod = k_t_n_offsets % N
@@ -932,26 +930,19 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
                 sa = dropout_k(sa, train, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
                 
                 # Propagate back
-                dloss_dx_blck_ptr = bs_h_dloss_dx_ptr + q_n_offsets_mod[:,None] * dloss_dx_stride1 + d_offsets_mod[None, :] * dloss_dx_stride2
-                dloss_dx_blck_mask = (q_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
-                dloss_dx_blck = tl.load(dloss_dx_blck_ptr, mask=dloss_dx_blck_mask, other=0.0)
-                dloss_dx_blck = tl.inline_asm_elementwise(ASM, "=r, r", [dloss_dx_blck], dtype=tl.float32, is_pure=True, pack=1)
-                
                 # dloss_dv=torch.einsum(f'cd, ce -> ed', dloss_dx, sa), dloss_dx is Q_N x D, sa is Q_N x K_T_N
-                dloss_dv_blck = tl.trans(tl.dot(tl.trans(dloss_dx_blck), sa)) # TODO T: get rid of transposes                
+                dloss_dv_blck = tl.trans(tl.dot(tl.trans(input_dloss_dx_blck), sa)) # TODO T: get rid of transposes                
                 dloss_dv_blck_ptr = bs_h_dloss_dv_ptr + k_t_n_offsets[:,None] * dloss_dv_stride1 + d_offsets[None, :] * dloss_dv_stride2
                 dloss_dv_mask = (k_t_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
                 tl.atomic_add(dloss_dv_blck_ptr, dloss_dv_blck, mask=dloss_dv_mask) # TODO T: can we just do save instead??
-                
                 # dloss_dx = torch.einsum(f'cd, ed -> ce', dloss_dx, v)
                 v_blck_ptr = bs_h_v_ptr + k_t_n_offsets_mod[:,None] * v_stride1 + d_offsets_mod[None, :] * v_stride2
                 v_blck_mask = (k_t_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
                 v_blck = tl.load(v_blck_ptr, mask=v_blck_mask, other=0.0)
                 v_blck = tl.inline_asm_elementwise(ASM, "=r, r", [v_blck], dtype=tl.float32, is_pure=True, pack=1)
-                dloss_dx_blck = tl.dot(dloss_dx_blck, tl.trans(v_blck)) 
+                dloss_dx_blck = tl.dot(input_dloss_dx_blck, tl.trans(v_blck)) 
                 dloss_dx_blck = dloss_dx_blck * sa
                 # dloss_dx = t_log_softmax_bkwd2_t(dloss_dx, attn)
-                #dloss_dx_blck += tl.sum(dloss_dx_blck, axis=1, keep_dims=True) * -nominator/attn_logits_sumexp # BUG: SUM is inocrrect is tilling along K_T_N
                 dloss_dx_blck += rowise_dloss_dx_output_sum * -nominator/attn_logits_sumexp
                 dloss_dx_blck = tl.where(mask_blck, dloss_dx_blck, 0) # Q_N x K_T_N
                 # dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
@@ -976,7 +967,6 @@ def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torc
     mask = mask[0] # Asumme mask being the same across rows. TODO XXX: make that assumption throughput the code
     output = acts[-1]
     output = output.reshape(BS*H, N, D)
-    #v=output
     
     dloss_dq = torch.zeros_like(q)
     dloss_dk = torch.zeros_like(k)
@@ -996,7 +986,7 @@ def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torc
         p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
     k_t = torch.transpose(k, -2, -1)
     t_scaled_dot_prod_attn_bkwd3_k[grid](
-        dloss_dx, q, k_t, v, output, mask, 
+        dloss_dx, q, k_t, v, output, mask,
         dloss_dq, dloss_dk, dloss_dv,
         dloss_dx.stride(0), dloss_dx.stride(1), dloss_dx.stride(2),
         q.stride(0), q.stride(1), q.stride(2), k_t.stride(0), k_t.stride(1), k_t.stride(2), 
