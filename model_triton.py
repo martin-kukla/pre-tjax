@@ -612,6 +612,7 @@ def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True, p_gen_aux=None): # inputs:
     softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train, p_gen_aux)
     return torch.matmul(softmaxed_attn, v) # output: BS x H x N x D
 
+import triton_extensions as tl_ext
 # This will work for moderate size of D: it's tiling along N dimension of Q, and along N dimension of K_T&V.
 # It doesn't tile along D dimension.
 # Different program per BS_H item (reshape of BS and H in one dim, and one program per this dim)
@@ -622,8 +623,9 @@ def t_scaled_dot_prod_attn_fwd3_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, a
                 v_stride0, v_stride1, v_stride2, mask_stride0, mask_stride1,
                 output_stride0, output_stride1, output_stride2, acts0_stride0, acts1_stride0,
                 train, p_gen_aux,
-                BS_H, N, D,
+                BS_H, N:tl.constexpr, D,
                 BLOCK_SIZE_Q_N: tl.constexpr, BLOCK_SIZE_K_T_N: tl.constexpr, BLOCK_SIZE_D: tl.constexpr,
+                Q_N_BLCKS: tl.constexpr,
                 num_stages: tl.constexpr
                 ):
     # Matching PyTorch's fp32 dtype ( see https://github.com/triton-lang/triton/issues/4574)
@@ -638,9 +640,13 @@ def t_scaled_dot_prod_attn_fwd3_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, a
         bs_h_v_ptr = v_ptr + bs_h_pid * v_stride0        
         bs_h_output_ptr = output_ptr + bs_h_pid * output_stride0
         bs_h_acts0_ptr = acts0_ptr + bs_h_pid * acts0_stride0
-        bs_h_acts1_ptr = acts1_ptr + bs_h_pid * acts1_stride0        
-
-        for q_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_Q_N)):          
+        bs_h_acts1_ptr = acts1_ptr + bs_h_pid * acts1_stride0    
+        
+        # First pass for softmax of "Q * K^T / sqrt(D) + Mask": get row-wise logits' max & sumexp (denominator)
+        # TODO T: Is this scalable way of doing it? We keep N results..
+        all_logits_max = tl.full((Q_N_BLCKS, BLOCK_SIZE_Q_N), -1e9, tl.float32)
+        all_logits_sumexp = tl.zeros_like(all_logits_max)
+        for q_n_step in tl.static_range(0, Q_N_BLCKS):          
             q_n_offsets = q_n_step * BLOCK_SIZE_Q_N + tl.arange(0, BLOCK_SIZE_Q_N)            
             d_offsets = tl.arange(0, BLOCK_SIZE_D)
             # TODO T: Do I need modulo n, modulo m operations? 
@@ -652,7 +658,6 @@ def t_scaled_dot_prod_attn_fwd3_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, a
             q_blck_mask = (q_n_offsets[:,None] < N) & (d_offsets[None, :] < D)
             q_blck = tl.load(q_blck_ptr, mask=q_blck_mask, other=0.0)
 
-            # First pass for softmax of "Q * K^T / sqrt(D) + Mask": get row-wise logits' max & sumexp (denominator)
             acc_max = tl.full((BLOCK_SIZE_Q_N,1), -1e9, tl.float32)
             acc_logits_sumexp = tl.zeros_like(acc_max)
             for k_t_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_K_T_N)):
@@ -678,9 +683,30 @@ def t_scaled_dot_prod_attn_fwd3_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, a
                 n_acc_max = tl.maximum(acc_max, blck_acc_max)
                 acc_logits_sumexp = acc_logits_sumexp * tl.exp(acc_max - n_acc_max) + tl.sum(tl.exp(acc - n_acc_max), axis=1, keep_dims=True)
                 acc_max = n_acc_max
-            # Store logits's max + sumexp for backward pass
-            tl.store(bs_h_acts0_ptr + q_n_offsets_mod, acc_max.reshape(BLOCK_SIZE_Q_N), mask=q_n_offsets<N)
-            tl.store(bs_h_acts1_ptr + q_n_offsets_mod, acc_logits_sumexp.reshape(BLOCK_SIZE_Q_N), mask=q_n_offsets<N)            
+            all_logits_max = tl_ext._put_slice_(all_logits_max, 2, 1, q_n_step, Q_N_BLCKS, acc_max.reshape(BLOCK_SIZE_Q_N))
+            all_logits_sumexp = tl_ext._put_slice_(all_logits_sumexp, 2, 1, q_n_step, Q_N_BLCKS, acc_logits_sumexp.reshape(BLOCK_SIZE_Q_N))
+        all_n_offsets = tl.arange(0, N)
+        tl.store(bs_h_acts0_ptr + all_n_offsets, all_logits_max.reshape(N), mask=all_n_offsets<N)
+        tl.store(bs_h_acts1_ptr + all_n_offsets, all_logits_sumexp.reshape(N), mask=all_n_offsets<N)  
+        
+        for q_n_step in tl.static_range(0, Q_N_BLCKS):          
+            q_n_offsets = q_n_step * BLOCK_SIZE_Q_N + tl.arange(0, BLOCK_SIZE_Q_N)            
+            d_offsets = tl.arange(0, BLOCK_SIZE_D)
+            # TODO T: Do I need modulo n, modulo m operations? 
+            q_n_offsets_mod = q_n_offsets % N
+            d_offsets_mod = d_offsets %D
+            
+            # Load Q blck once
+            q_blck_ptr = bs_h_q_ptr + q_n_offsets_mod[:,None] * q_stride1 + d_offsets_mod[None, :] * q_stride2
+            q_blck_mask = (q_n_offsets[:,None] < N) & (d_offsets[None, :] < D)
+            q_blck = tl.load(q_blck_ptr, mask=q_blck_mask, other=0.0)
+
+            # Get precomputed logits' max & sumexp
+            acc_max = tl_ext._take_slice_(all_logits_max, 2, 1, q_n_step, Q_N_BLCKS, keep_dim=False)
+            acc_logits_sumexp = tl_ext._take_slice_(all_logits_sumexp, 2, 1, q_n_step, Q_N_BLCKS, keep_dim=False)            
+            acc_max = acc_max.expand_dims(1)
+            acc_logits_sumexp = acc_logits_sumexp.expand_dims(1)             
+            
             
             # Second pass for softmax of "Q * K^T / sqrt(D) + Mask"
             output = tl.zeros((BLOCK_SIZE_Q_N, BLOCK_SIZE_D), dtype=tl.float32)
@@ -754,6 +780,7 @@ def n_t_scaled_dot_prod_attn_fwd3_t(qkv:torch.Tensor, mask:torch.Tensor, train=T
         train, p_gen_aux,
         BS*H, N, D,
         BLOCK_SIZE_Q_N=BLOCK_SIZE_Q_N, BLOCK_SIZE_K_T_N = BLOCK_SIZE_K_T_N, BLOCK_SIZE_D=BLOCK_SIZE_D,
+        Q_N_BLCKS = triton.cdiv(N, BLOCK_SIZE_Q_N), # TODO T: Is there a way to do that cdiv inside kernel?
         num_warps=num_warps, num_stages=num_stages)
     
     output = output.reshape(BS, H, N, D)
