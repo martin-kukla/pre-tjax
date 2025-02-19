@@ -905,9 +905,9 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
                 dloss_dv_blck = tl.dot(tl.trans(sa), input_dloss_dx_blck, dloss_dv_blck)
                 # dloss_dx = torch.einsum(f'cd, ed -> ce', dloss_dx, v)
                 dloss_dx_blck = tl.dot(input_dloss_dx_blck, tl.trans(v_blck)) 
-                dloss_dx_blck = dloss_dx_blck * sa
-                # dloss_dx = t_log_softmax_bkwd2_t(dloss_dx, attn)
-                dloss_dx_blck += rowise_dloss_dx_output_sum * -sa_pre_dropout
+                dloss_dx_blck = dloss_dx_blck * sa + rowise_dloss_dx_output_sum * -sa_pre_dropout
+                # TODO T: For small speedup, replace the above with: (we need an access to zs though)
+                #dloss_dx_blck = sa_pre_dropout * ( dloss_dx_blck * zs - rowise_dloss_dx_output_sum)
                 dloss_dx_blck = tl.where(mask_blck, dloss_dx_blck, 0) # Q_N x K_T_N
                 # dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
                 dloss_dq_blck = tl.dot(dloss_dx_blck, tl.trans(k_blck)/sqrt_D) # TODO T: rename k_blck into k_t_blck!
