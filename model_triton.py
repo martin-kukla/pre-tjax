@@ -862,8 +862,14 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
             v_blck = tl.inline_asm_elementwise(ASM, "=r, r", [v_blck], dtype=tl.float32, is_pure=True, pack=1)
             
             dloss_dk_blck = tl.zeros((BLOCK_SIZE_K_T_N, BLOCK_SIZE_D), dtype=tl.float32)
-            dloss_dv_blck = tl.zeros((BLOCK_SIZE_K_T_N, BLOCK_SIZE_D), dtype=tl.float32)            
-            for q_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_Q_N)):          
+            dloss_dv_blck = tl.zeros((BLOCK_SIZE_K_T_N, BLOCK_SIZE_D), dtype=tl.float32)   
+            
+            # ASSUMES CAUSAL MASK FOR NOW 
+            # This is somehow limited suppport for now. I only tested this for
+            # a) BLOCK_SIZE_K_T_N = BLOCK_SIZE_Q_N and BLOCK_SIZE_K_T_N = 2x BLOCK_SIZE_Q_N
+            q_n_step_start = max(0, k_t_n_step * tl.cdiv(BLOCK_SIZE_K_T_N,BLOCK_SIZE_Q_N))
+            
+            for q_n_step in range(q_n_step_start, tl.cdiv(N, BLOCK_SIZE_Q_N)):          
                 q_n_offsets = q_n_step * BLOCK_SIZE_Q_N + tl.arange(0, BLOCK_SIZE_Q_N)            
                 q_n_offsets_mod = q_n_offsets % N # TODO T: Do I need modulo n, modulo m operations? 
 
@@ -945,14 +951,19 @@ def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torc
     dloss_dv = torch.zeros_like(v)    
     
     # TODO T: check if some matrices are contiguous?
-    grid = (min(BS*H, 80),)
+    grid = (min(BS*H, 80),) # TODO T: We can bump it up to 160?
 
     # Tuned params given num_warps=8, and BS, H, N, D = 8, 12, 512, 64
     num_warps = 8
     num_stages = 2 # TODO T: I don't think this helps
-    BLOCK_SIZE_Q_N = 32 
-    BLOCK_SIZE_K_T_N = 64
+    # TODO T: We have more memory to use, but smaller block_size use sparsity of causal mask better
+    BLOCK_SIZE_Q_N = 32  
+    BLOCK_SIZE_K_T_N = 32 
     BLOCK_SIZE_D = triton.next_power_of_2(D)
+    
+    # We enforce causal masking for now, but the assert below cost too much perf
+    #assert torch.allclose(mask, torch.tril(torch.ones((N, N), device=mask.device, dtype=torch.bool))), "Assumes causal mask"
+    assert BLOCK_SIZE_K_T_N>= BLOCK_SIZE_Q_N, "Due to the limited support for levarging causal mask"
 
     if not train:
         p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
