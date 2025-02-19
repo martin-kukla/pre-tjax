@@ -844,52 +844,55 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
         bs_h_dloss_dk_ptr = dloss_dk_ptr + bs_h_pid * dloss_dk_stride0
         bs_h_dloss_dv_ptr = dloss_dv_ptr + bs_h_pid * dloss_dv_stride0
 
-        for q_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_Q_N)):          
-            q_n_offsets = q_n_step * BLOCK_SIZE_Q_N + tl.arange(0, BLOCK_SIZE_Q_N)            
-            d_offsets = tl.arange(0, BLOCK_SIZE_D)
-            # TODO T: Do I need modulo n, modulo m operations? 
-            q_n_offsets_mod = q_n_offsets % N
-            d_offsets_mod = d_offsets %D
+        d_offsets = tl.arange(0, BLOCK_SIZE_D)
+        d_offsets_mod = d_offsets %D
+        
+        for k_t_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_K_T_N)):
             
-            # Load Q blck once
-            q_blck_ptr = bs_h_q_ptr + q_n_offsets_mod[:,None] * q_stride1 + d_offsets_mod[None, :] * q_stride2
-            q_blck_mask = (q_n_offsets[:,None] < N) & (d_offsets[None, :] < D)
-            q_blck = tl.load(q_blck_ptr, mask=q_blck_mask, other=0.0)
+            # Load K_T and V blcks
+            k_t_n_offsets = k_t_n_step * BLOCK_SIZE_K_T_N + tl.arange(0, BLOCK_SIZE_K_T_N) 
+            k_t_n_offsets_mod = k_t_n_offsets % N
+            k_blck_ptr = bs_h_k_t_ptr + d_offsets_mod[:,None] * k_t_stride1 + k_t_n_offsets_mod[None, :] * k_t_stride2
+            k_blck_mask = (d_offsets[:, None] < D) & (k_t_n_offsets[None, :] < N)
+            k_blck = tl.load(k_blck_ptr, mask=k_blck_mask, other=0.0) # TODO T: rename to k_t_blck!
+            k_blck = tl.inline_asm_elementwise(ASM, "=r, r", [k_blck], dtype=tl.float32, is_pure=True, pack=1)
+            v_blck_ptr = bs_h_v_ptr + k_t_n_offsets_mod[:,None] * v_stride1 + d_offsets_mod[None, :] * v_stride2
+            v_blck_mask = (k_t_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
+            v_blck = tl.load(v_blck_ptr, mask=v_blck_mask, other=0.0)
+            v_blck = tl.inline_asm_elementwise(ASM, "=r, r", [v_blck], dtype=tl.float32, is_pure=True, pack=1)
             
-            # Load softmax logits' max and sumexp
-            attn_max = tl.load(bs_h_acts0_ptr+ q_n_offsets_mod, mask=q_n_offsets < N, other=-1e9)
-            attn_max = attn_max.expand_dims(1)
-            attn_logits_sumexp = tl.load(bs_h_acts1_ptr+ q_n_offsets_mod, mask=q_n_offsets < N, other=0.0)            
-            attn_logits_sumexp = attn_logits_sumexp.expand_dims(1)
-            
-            # Precompute row-wise sum of dloss_dx * output
-            dloss_dx_blck_ptr = bs_h_dloss_dx_ptr + q_n_offsets_mod[:,None] * dloss_dx_stride1 + d_offsets_mod[None, :] * dloss_dx_stride2
-            dloss_dx_blck_mask = (q_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
-            input_dloss_dx_blck = tl.load(dloss_dx_blck_ptr, mask=dloss_dx_blck_mask, other=0.0)
-            input_dloss_dx_blck = tl.inline_asm_elementwise(ASM, "=r, r", [input_dloss_dx_blck], dtype=tl.float32, is_pure=True, pack=1)
-            output_blck_ptr = bs_h_output_ptr + q_n_offsets_mod[:,None] * output_stride1 + d_offsets_mod[None, :] * output_stride2
-            output_blck_ptr = bs_h_output_ptr + q_n_offsets_mod[:,None] * output_stride1 + d_offsets_mod[None, :] * output_stride2
-            output_blck_mask = (q_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
-            output_blck = tl.load(output_blck_ptr, mask=output_blck_mask, other=0.0)
-            output_blck = tl.inline_asm_elementwise(ASM, "=r, r", [output_blck], dtype=tl.float32, is_pure=True, pack=1)
-            rowise_dloss_dx_output_sum = tl.sum(input_dloss_dx_blck * output_blck, axis=1, keep_dims=True)
-                
-            # Compute softmax of "Q * K^T / sqrt(D) + Mask", and backpropagate
-            dloss_dq_blck = tl.zeros((BLOCK_SIZE_Q_N, BLOCK_SIZE_D), dtype=tl.float32)
-            for k_t_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_K_T_N)):
-                k_t_n_offsets = k_t_n_step * BLOCK_SIZE_K_T_N + tl.arange(0, BLOCK_SIZE_K_T_N) 
-                k_t_n_offsets_mod = k_t_n_offsets % N
-                
-                # Q * K^T
-                k_blck_ptr = bs_h_k_t_ptr + d_offsets_mod[:,None] * k_t_stride1 + k_t_n_offsets_mod[None, :] * k_t_stride2
-                k_blck_mask = (d_offsets[:, None] < D) & (k_t_n_offsets[None, :] < N)
-                k_blck = tl.load(k_blck_ptr, mask=k_blck_mask, other=0.0)
-                # Matching PyTorch's fp32 dtype ( see https://github.com/triton-lang/triton/issues/4574)
-                q_blck = tl.inline_asm_elementwise(ASM, "=r, r", [q_blck], dtype=tl.float32, is_pure=True, pack=1)
-                k_blck = tl.inline_asm_elementwise(ASM, "=r, r", [k_blck], dtype=tl.float32, is_pure=True, pack=1)
-                attn = tl.dot(q_blck, k_blck)
+            dloss_dk_blck = tl.zeros((BLOCK_SIZE_K_T_N, BLOCK_SIZE_D), dtype=tl.float32)
+            dloss_dv_blck = tl.zeros((BLOCK_SIZE_K_T_N, BLOCK_SIZE_D), dtype=tl.float32)            
+            for q_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_Q_N)):          
+                q_n_offsets = q_n_step * BLOCK_SIZE_Q_N + tl.arange(0, BLOCK_SIZE_Q_N)            
+                q_n_offsets_mod = q_n_offsets % N # TODO T: Do I need modulo n, modulo m operations? 
 
-                # /sqrt(D) + Mask + Softmax + Dropout
+                # Load Q blck
+                q_blck_ptr = bs_h_q_ptr + q_n_offsets_mod[:,None] * q_stride1 + d_offsets_mod[None, :] * q_stride2
+                q_blck_mask = (q_n_offsets[:,None] < N) & (d_offsets[None, :] < D)
+                q_blck = tl.load(q_blck_ptr, mask=q_blck_mask, other=0.0)
+                q_blck = tl.inline_asm_elementwise(ASM, "=r, r", [q_blck], dtype=tl.float32, is_pure=True, pack=1)
+
+                # Load softmax logits' max and sumexp
+                attn_max = tl.load(bs_h_acts0_ptr+ q_n_offsets_mod, mask=q_n_offsets < N, other=-1e9)
+                attn_max = attn_max.expand_dims(1)
+                attn_logits_sumexp = tl.load(bs_h_acts1_ptr+ q_n_offsets_mod, mask=q_n_offsets < N, other=0.0)            
+                attn_logits_sumexp = attn_logits_sumexp.expand_dims(1)
+
+                # Precompute row-wise sum of dloss_dx * output
+                dloss_dx_blck_ptr = bs_h_dloss_dx_ptr + q_n_offsets_mod[:,None] * dloss_dx_stride1 + d_offsets_mod[None, :] * dloss_dx_stride2
+                dloss_dx_blck_mask = (q_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
+                input_dloss_dx_blck = tl.load(dloss_dx_blck_ptr, mask=dloss_dx_blck_mask, other=0.0)
+                input_dloss_dx_blck = tl.inline_asm_elementwise(ASM, "=r, r", [input_dloss_dx_blck], dtype=tl.float32, is_pure=True, pack=1)
+                output_blck_ptr = bs_h_output_ptr + q_n_offsets_mod[:,None] * output_stride1 + d_offsets_mod[None, :] * output_stride2
+                output_blck_ptr = bs_h_output_ptr + q_n_offsets_mod[:,None] * output_stride1 + d_offsets_mod[None, :] * output_stride2
+                output_blck_mask = (q_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
+                output_blck = tl.load(output_blck_ptr, mask=output_blck_mask, other=0.0)
+                output_blck = tl.inline_asm_elementwise(ASM, "=r, r", [output_blck], dtype=tl.float32, is_pure=True, pack=1)
+                rowise_dloss_dx_output_sum = tl.sum(input_dloss_dx_blck * output_blck, axis=1, keep_dims=True)
+
+                # Compute "Q * K^T / sqrt(D) + Mask + Softmax + Dropout", and backpropagate
+                attn = tl.dot(q_blck, k_blck)
                 attn = attn / sqrt_D
                 mask_blck_ptr = mask_ptr + q_n_offsets_mod[:,None] * mask_stride0 + k_t_n_offsets_mod[None, :] * mask_stride1
                 mask_mask = (q_n_offsets[:,None] <N) & (k_t_n_offsets[None, :]<N)
@@ -900,33 +903,32 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
                 sa = nominator/attn_logits_sumexp
                 # TODO T: confirm that this is different enough seed per row (assumes that D_PID always equals to 0)
                 sa = dropout_k(sa, train, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
-                
+
                 # Propagate back
                 # dloss_dv=torch.einsum(f'cd, ce -> ed', dloss_dx, sa), dloss_dx is Q_N x D, sa is Q_N x K_T_N
-                dloss_dv_blck = tl.trans(tl.dot(tl.trans(input_dloss_dx_blck), sa)) # TODO T: get rid of transposes                
-                dloss_dv_blck_ptr = bs_h_dloss_dv_ptr + k_t_n_offsets[:,None] * dloss_dv_stride1 + d_offsets[None, :] * dloss_dv_stride2
-                dloss_dv_mask = (k_t_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
-                tl.atomic_add(dloss_dv_blck_ptr, dloss_dv_blck, mask=dloss_dv_mask) # TODO T: can we just do save instead??
+                dloss_dv_blck += tl.trans(tl.dot(tl.trans(input_dloss_dx_blck), sa)) # TODO T: get rid of transposes
                 # dloss_dx = torch.einsum(f'cd, ed -> ce', dloss_dx, v)
-                v_blck_ptr = bs_h_v_ptr + k_t_n_offsets_mod[:,None] * v_stride1 + d_offsets_mod[None, :] * v_stride2
-                v_blck_mask = (k_t_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
-                v_blck = tl.load(v_blck_ptr, mask=v_blck_mask, other=0.0)
-                v_blck = tl.inline_asm_elementwise(ASM, "=r, r", [v_blck], dtype=tl.float32, is_pure=True, pack=1)
                 dloss_dx_blck = tl.dot(input_dloss_dx_blck, tl.trans(v_blck)) 
                 dloss_dx_blck = dloss_dx_blck * sa
                 # dloss_dx = t_log_softmax_bkwd2_t(dloss_dx, attn)
                 dloss_dx_blck += rowise_dloss_dx_output_sum * -nominator/attn_logits_sumexp
                 dloss_dx_blck = tl.where(mask_blck, dloss_dx_blck, 0) # Q_N x K_T_N
                 # dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
-                dloss_dq_blck = tl.dot(dloss_dx_blck, tl.trans(k_blck)/sqrt_D, dloss_dq_blck) # TODO T: rename k_blck into k_t_blck!
+                dloss_dq_blck = tl.dot(dloss_dx_blck, tl.trans(k_blck)/sqrt_D) # TODO T: rename k_blck into k_t_blck!
+                dloss_dq_mask = (q_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
+                dloss_dq_blck_ptr = bs_h_dloss_dq_ptr + q_n_offsets[:,None] * dloss_dq_stride1 + d_offsets[None, :] * dloss_dq_stride2                
+                tl.atomic_add(dloss_dq_blck_ptr, dloss_dq_blck, mask=dloss_dq_mask)                
                 # dloss_dk = torch.einsum('abcd, abce->abde', dloss_dx/math.sqrt(D), q)
-                dloss_dk_blck = tl.dot(tl.trans(dloss_dx_blck)/sqrt_D, q_blck)
-                dloss_dk_blck_ptr = bs_h_dloss_dk_ptr + k_t_n_offsets[:,None] * dloss_dk_stride1 + d_offsets[None, :] * dloss_dk_stride2                
-                dloss_dk_mask = (k_t_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
-                tl.atomic_add(dloss_dk_blck_ptr, dloss_dk_blck, mask=dloss_dk_mask) # TODO T: can we just do save instead??
-            dloss_dq_blck_ptr = bs_h_dloss_dq_ptr + q_n_offsets[:,None] * dloss_dq_stride1 + d_offsets[None, :] * dloss_dq_stride2
-            dloss_dq_mask = (q_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
-            tl.store(dloss_dq_blck_ptr, dloss_dq_blck, mask=dloss_dq_mask)
+                dloss_dk_blck = tl.dot(tl.trans(dloss_dx_blck)/sqrt_D, q_blck, dloss_dk_blck)
+            
+            dloss_dv_blck_ptr = bs_h_dloss_dv_ptr + k_t_n_offsets[:,None] * dloss_dv_stride1 + d_offsets[None, :] * dloss_dv_stride2
+            dloss_dv_mask = (k_t_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
+            tl.store(dloss_dv_blck_ptr, dloss_dv_blck, mask=dloss_dv_mask)
+            
+            dloss_dk_blck_ptr = bs_h_dloss_dk_ptr + k_t_n_offsets[:,None] * dloss_dk_stride1 + d_offsets[None, :] * dloss_dk_stride2                
+            dloss_dk_mask = (k_t_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
+            tl.store(dloss_dk_blck_ptr, dloss_dk_blck, mask=dloss_dk_mask)
+                
 
 def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torch.Tensor, train=True, p_gen_aux=None):
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
@@ -952,8 +954,8 @@ def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torc
     # Tuned params given num_warps=8, and BS, H, N, D = 8, 12, 512, 64
     num_warps = 8
     num_stages = 2 # TODO T: I don't think this helps
-    BLOCK_SIZE_Q_N = 64 #128
-    BLOCK_SIZE_K_T_N = 32 #64
+    BLOCK_SIZE_Q_N = 32 #64 #128
+    BLOCK_SIZE_K_T_N = 64 #32 #64
     BLOCK_SIZE_D = triton.next_power_of_2(D)
 
     if not train:
