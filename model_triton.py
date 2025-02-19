@@ -857,9 +857,9 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
             q_blck = tl.load(q_blck_ptr, mask=q_blck_mask, other=0.0)
             
             # Load softmax logits' max and sumexp
-            attn_max = tl.load(bs_h_acts0_ptr+ q_n_offsets_mod, mask=q_n_offsets < N)
+            attn_max = tl.load(bs_h_acts0_ptr+ q_n_offsets_mod, mask=q_n_offsets < N, other=-1e9)
             attn_max = attn_max.expand_dims(1)
-            attn_logits_sumexp = tl.load(bs_h_acts1_ptr+ q_n_offsets_mod, mask=q_n_offsets < N)            
+            attn_logits_sumexp = tl.load(bs_h_acts1_ptr+ q_n_offsets_mod, mask=q_n_offsets < N, other=0.0)            
             attn_logits_sumexp = attn_logits_sumexp.expand_dims(1)
             
             # Precompute row-wise sum of dloss_dx * output
@@ -937,11 +937,9 @@ def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torc
     k = k.reshape(BS*H, N, D)
     v = v.reshape(BS*H, N, D)
     mask = mask[0] # Asumme mask being the same across rows. TODO XXX: make that assumption throughput the code
-    acts0 = acts[0]
+    acts0, acts1, output = acts
     acts0 = acts0.reshape(BS*H, N)
-    acts1 = acts[1]
     acts1 = acts1.reshape(BS*H, N)    
-    output = acts[-1]
     output = output.reshape(BS*H, N, D)
     
     dloss_dq = torch.zeros_like(q)
@@ -968,7 +966,7 @@ def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torc
         q.stride(0), q.stride(1), q.stride(2), k_t.stride(0), k_t.stride(1), k_t.stride(2), 
         v.stride(0), v.stride(1), v.stride(2),
         output.stride(0), output.stride(1), output.stride(2),        
-        mask.stride(0), mask.stride(1), acts0.stride(0), acts1.stride(1),
+        mask.stride(0), mask.stride(1), acts0.stride(0), acts1.stride(0),
         dloss_dq.stride(0), dloss_dq.stride(1), dloss_dq.stride(2),        
         dloss_dk.stride(0), dloss_dk.stride(1), dloss_dk.stride(2),
         dloss_dv.stride(0), dloss_dv.stride(1), dloss_dv.stride(2),
