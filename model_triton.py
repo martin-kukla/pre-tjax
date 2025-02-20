@@ -1487,9 +1487,7 @@ def t_dropout_fwd_t(x: torch.Tensor, train=True, p_gen_aux=None):
     # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
     num_warps = 8
     num_stages = 2
-    num_programs = min(n_rows, 480) 
-    if not train:
-        p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
+    num_programs = min(n_rows, 480)
     t_dropout_fwd_k[(num_programs,)](x_2d, train, p_gen_aux, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
     return output.reshape(x.shape)
 
@@ -1554,7 +1552,7 @@ def t_dropout_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor, train=True, p_gen
     # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
     num_warps = 8
     num_stages = 2
-    num_programs = min(n_rows, 480) 
+    num_programs = min(n_rows, 480)
     t_dropout_bkwd2_k[(num_programs,)](dloss_dx_2d, train, p_gen_aux, output, dloss_dx_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
     return output.reshape(dloss_dx.shape)
 
@@ -1874,7 +1872,7 @@ def t_gpt2_tlayer_sublock1_fwd3(layer_params, y, mask, train=True, p_gen_aux=Non
 
 def t_gpt2_tlayer_sublock1_fwd3_t(layer_params, y, mask, train=True, p_gen_aux=None):
     if not train:
-        p_gen_aux = [None, None]
+        p_gen_aux = [0, 0] # Mock values for Triton compilation
         
     y_diff = t_layernorm_fwd_t(layer_params[:2], y)
     y_diff1 = y_diff
@@ -2006,7 +2004,7 @@ def t_gpt2_tlayer_sublock1_bkwd3(dloss_dx, acts, layer_params, y, mask, train=Tr
 
 def t_gpt2_tlayer_sublock1_bkwd3_t(dloss_dx, acts, layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
     if not train:
-        p_gen_aux = [None, None]
+        p_gen_aux = [0, 0] # Mock values for Triton compilation
         
     blck_dloss_dx = dloss_dx
     y_diff = acts[0][0]
@@ -2199,7 +2197,7 @@ def t_gpt2_tlayer_fwd3(layer_params, y, mask, train=True, p_gen_aux=None): # inp
 
 def t_gpt2_tlayer_fwd3_t(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
     if not train:
-        p_gen_aux = [None, None, None] 
+        p_gen_aux = [0, 0, 0] # Mock values for Triton compilation
 
     y, sblck1_acts = t_gpt2_tlayer_sublock1_fwd3_t(layer_params[:-6], y, mask, train, p_gen_aux[:2])
     acts = [sblck1_acts]
@@ -2276,7 +2274,7 @@ def t_gpt2_tlayer_bkwd3(dloss_dx, acts, layer_params, y, mask, train=True, p_gen
 
 def t_gpt2_tlayer_bkwd3_t(dloss_dx, acts, layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
     if not train:
-        p_gen_aux = [None, None, None]    
+        p_gen_aux = [0, 0, 0] # Mock values for Triton compilation
     
     dloss_dx, subblock2_dloss_dp = t_gpt2_tlayer_sublock2_bkwd3_t(dloss_dx, acts[-1][1], layer_params[-6:], acts[-1][0], train, p_gen_aux[2])
     dloss_dx, subblock1_dloss_dp = t_gpt2_tlayer_sublock1_bkwd3_t(dloss_dx, acts[-2], layer_params[:-6], y, mask, train, p_gen_aux[:2])
@@ -2319,7 +2317,7 @@ def t_gpt2_tlayers_fwd3(params, y, mask, indices, train=True, p_gen_aux=None): #
 
 def t_gpt2_tlayers_fwd3_t(params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
     if not train: # as there are 3 dropouts per tlayer
-        p_gen_aux = [None] + [None] * 3 * (len(params) - 3)
+        p_gen_aux = [0] + [0] * 3 * (len(params) - 3) # Mock values for Triton compilation
     
     y = t_embed_fwd(params[0], y)
     y = y + params[1][0]
@@ -2474,7 +2472,7 @@ def t_gpt2_tlayers_bkwd3_p(dloss_dx, acts, params, y, mask, indices, train=True,
 
 def t_gpt2_tlayers_bkwd3_p_t(dloss_dx, acts, params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
     if not train: # as there are 3 dropouts per tlayer
-        p_gen_aux = [None] + [None] * 3 * (len(params) - 3)    
+        p_gen_aux = [0] + [0] * 3 * (len(params) - 3) # Mock values for Triton compilation
     
     indices = torch.arange(y.shape[1], device=y.device).unsqueeze(0).expand(*y.shape) # we ignore indices arg
     t_dropout_input = acts[0]
