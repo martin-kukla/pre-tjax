@@ -699,7 +699,7 @@ def t_scaled_dot_prod_attn_fwd3_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, a
             tl.store(output_blck_ptr, output, mask=output_mask)
     
 
-def n_t_scaled_dot_prod_attn_fwd3_t(qkv:torch.Tensor, mask:torch.Tensor, train=True, p_gen_aux=None):
+def t_scaled_dot_prod_attn_fwd3_t(qkv:torch.Tensor, mask:torch.Tensor, train=True, p_gen_aux=None):
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
     BS, H, N, D = q.shape
     
@@ -745,7 +745,8 @@ def t_scaled_dot_prod_attn_fwd3(qkv, mask, train=True, p_gen_aux=None): # inputs
     softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train, p_gen_aux)
     return torch.matmul(softmaxed_attn, v), [softmaxed_attn] # output: BS x H x N x D
 
-def t_scaled_dot_prod_attn_fwd3_t(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
+# TODO: Remove
+def old_t_scaled_dot_prod_attn_fwd3_t(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
     softmaxed_attn = t_softmax_attn_fwd_t(q, k, mask, train, p_gen_aux)
     return torch.matmul(softmaxed_attn, v), [softmaxed_attn] # output: BS x H x N x D
@@ -796,7 +797,8 @@ def t_scaled_dot_prod_attn_bkwd3(dloss_dx, acts, qkv, mask, train=True, p_gen_au
     
     return dloss_dq, dloss_dk, dloss_dv
 
-def t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
+# TODO: Remove
+def old_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     BS, H, _, N, D = qkv.shape
     q, k, v = torch.unbind(qkv, dim=2)
     sa = acts[0]
@@ -932,7 +934,7 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
             tl.store(dloss_dk_blck_ptr, dloss_dk_blck, mask=dloss_dk_mask)
                 
 
-def n_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torch.Tensor, train=True, p_gen_aux=None):
+def t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torch.Tensor, train=True, p_gen_aux=None):
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
     BS, H, N, D = q.shape
     
