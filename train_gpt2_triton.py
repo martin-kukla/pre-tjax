@@ -5,9 +5,9 @@
 ###############################################
 import argparse
 parser = argparse.ArgumentParser("train_gpt2_trition")
-parser.add_argument("backend", help="Either 'torchfunc_jit' or 'triton'.", type=str)
+parser.add_argument("backend", help="Either 'torchfunc_jit', 'triton', 'pre-triton' or 'debug_jacs'.", type=str)
 args = parser.parse_args()
-assert args.backend in ["torchfunc_jit", "triton", "debug_jacs"]
+assert args.backend in ["torchfunc_jit", "triton", "pre-triton", "debug_jacs"]
 
 ###############################################
 ### DATASETs
@@ -40,7 +40,7 @@ model_vocab_size = tokenizer_vocab_size + 3 # add padding token (0) + start of s
 START_TOK = tokenizer_vocab_size + 1
 END_TOK = tokenizer_vocab_size + 2 # TODO: in default LLM convention, it should be 1. Also, it could be part of tokenizer_vocab_size
 EMB_DIM=768
-FFN_DIM=3072
+FFN_DIM=EMB_DIM * 4
 NUM_HEADS = 12
 seq_len= 512 # TODO XXX: 1024 is orginal paper
 params = init_transformer_gpt2(model_vocab_size, EMB_DIM, LAYERS, NUM_HEADS, FFN_DIM, seq_len)
@@ -49,7 +49,7 @@ print(f'Vocabulary size: {model_vocab_size:_}')
 print(f'Number of params: {count_num_params(params):_}')
 
 # ### Loss + Grads + Optimizers
-from loss_and_optimizer_triton import loss_train, loss_eval, grad_loss, acc_grad_loss, t_acc_grad_loss, t_acc_grad_loss2, t_acc_grad_loss3, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms # TODO XXX: add remaining
+from loss_and_optimizer_triton import loss_train, loss_eval, grad_loss, acc_grad_loss, t_acc_grad_loss, t_acc_grad_loss2, t_acc_grad_loss3, t_acc_grad_loss3_t, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms # TODO XXX: add remaining
 # from loss_and_optimizer import loss_train, loss_eval, log_probs, grad_loss, predict, acc_grad_loss, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms
 
 # Choose the accumulation gradient loss function depending on the selected ML backend
@@ -58,8 +58,10 @@ if args.backend =="torchfunc_jit":
     acc_grad_loss_func =  acc_grad_loss
 elif args.backend =="debug_jacs":
     acc_grad_loss_func = t_acc_grad_loss
-else:
+elif args.backend =="pre-triton":
     acc_grad_loss_func = t_acc_grad_loss3
+else:
+    acc_grad_loss_func = t_acc_grad_loss3_t
 
 # # Figure out non bias/gain params, as we only want to apply weight decay to those in AdamW
 # # Only 1D weights, which are initialized to 0s are bias/gain params (including bias of LayerNorm)

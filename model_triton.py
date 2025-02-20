@@ -229,6 +229,12 @@ def t_gelu_fwd(x):
 def tanh_k(x):
     return 2 * tl.sigmoid(2 * x) - 1
 
+gelu_k_const:tl.constexpr = math.sqrt(2/math.pi)
+@triton.jit
+def gelu_k(x):
+    return 0.5 * x * (1 + tanh_k(gelu_k_const * (x + 0.044715 * x * x * x)))
+    
+    
 # TODO T: Do it in-place?
 @triton.jit
 def t_gelu_fwd_k(x_ptr,
@@ -242,8 +248,7 @@ def t_gelu_fwd_k(x_ptr,
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
     x = tl.load(x_ptr + offsets, mask=mask)
-    k = tl.sqrt(2/math.pi) # TODO T: compute one as contant outside
-    output = 0.5 * x * (1 + tanh_k(k * (x + 0.044715 * x * x * x)))
+    output = 0.5 * x * (1 + tanh_k(gelu_k_const * (x + 0.044715 * x * x * x)))
     tl.store(output_ptr + offsets, output, mask=mask)
 
 # TODO T: there are some small numerical differences between t_gelu_fwd and this
@@ -303,38 +308,38 @@ def t_gelu_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor):
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params[0], 0, 1)) + layer_params[1][None, :] # since layer_params[0] is output_dim x emb_dim, layer_params[1] is output_dim
 
-# TODO T: there are numerical inacuracies - investigate
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
-                      num_warps=2)
-            ],
-    key=[],
-)
+# This is an incomplete implementation. It makes the assumption that n_programs  
+# and m_programs are disiable by GROUP_SIZE_M
+# Assumes allow_tf32 (i.e. torch.backends.cuda.matmul.allow_tf32) being True 
+# Note I overload this function by adding logic for linear layer in it
 @triton.jit
-def t_matmul_k(a_ptr, b_ptr, output_ptr,
+def t_matmul_k(a_ptr, b_ptr, output_ptr, bias_ptr,
                 a_row_stride, a_col_stride,
                 b_row_stride, b_col_stride,
                 output_row_stride, output_col_stride,
                 n, m, k,
+                ADD_BIAS: tl.constexpr, ACTIVATION: tl.constexpr, # Overloading matmul with params for linear layer
                 BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
-                GROUP_SIZE_M: tl.constexpr
+                GROUP_SIZE_M: tl.constexpr,
                 ):
+    # Matching PyTorch's fp32 dtype ( see https://github.com/triton-lang/triton/issues/4574)
+    ASM: tl.constexpr = "cvt.rna.tf32.f32 $0, $1;"
+        
     pid = tl.program_id(0)
     n_programs = tl.cdiv(n, BLOCK_SIZE_N)
-    orig_n_pid = pid // n_programs
-    orig_m_pid = pid % n_programs
-    
-    n_pid = orig_n_pid
-    m_pid = orig_m_pid 
-    # TODO T: Below, tiling blocks doesn't give expected speedup improvement below. Investigate
+    m_programs = tl.cdiv(m, BLOCK_SIZE_M)
+    orig_n_pid = pid // m_programs
+    orig_m_pid = pid % m_programs
+       
+    # TODO T: Fix bug in Grouping to improve L2 Cache hit rate
     # TODO T: simplify the grp_id calculations. Expand if m_programs are not divisable by GROUP_SIZE_M
-    # TODO T: handle if m_programs < GROUP_SIZE_M
     # m_groups = m_programs // GROUP_SIZE_M # assumes m_programs is divisable by GROUP_SIZE_M for now
-    # n_grp_id = orig_n_pid % (n_programs//m_groups) # assumes n_programs is divisable by m_groups for now 
+    # n_grp_id = orig_n_pid % (n_programs//m_groups) # assumes n_programs is divisable by GROUP_SIZE_M for now
     # m_grp_id = (orig_n_pid * m_groups)//n_programs
     # n_pid =  n_grp_id * m_groups + orig_m_pid // GROUP_SIZE_M
     # m_pid =  m_grp_id * GROUP_SIZE_M + orig_m_pid % GROUP_SIZE_M
+    n_pid = orig_n_pid
+    m_pid = orig_m_pid 
     
     offsets = tl.arange(0, BLOCK_SIZE_K)     
     n_offsets = n_pid * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -350,7 +355,19 @@ def t_matmul_k(a_ptr, b_ptr, output_ptr,
         a_blck = tl.load(a_blck_ptr, mask=k_step_offsets[None, :] < k, other=0.0) 
         b_blck_ptr = b_ptr + k_step_offsets[:,None] * b_row_stride + m_offsets_mod[None, :] * b_col_stride
         b_blck = tl.load(b_blck_ptr, mask=k_step_offsets[:, None] < k, other=0.0)
-        acc = tl.dot(a_blck, b_blck, acc)
+
+        # Matching PyTorch's fp32 dtype ( see https://github.com/triton-lang/triton/issues/4574)
+        a_blck = tl.inline_asm_elementwise(ASM, "=r, r", [a_blck], dtype=tl.float32, is_pure=True, pack=1)
+        b_blck = tl.inline_asm_elementwise(ASM, "=r, r", [b_blck], dtype=tl.float32, is_pure=True, pack=1)
+        
+        # To test for double precision (https://github.com/triton-lang/triton/issues/4603)
+        # Use tf32x3 (slow) below without ASM elementwise casts above 
+        acc = tl.dot(a_blck, b_blck, acc) #, input_precision="tf32x3")
+    if ADD_BIAS:
+        bias = tl.load(bias_ptr + m_offsets, mask=m_offsets<m, other=0.0)
+        acc += bias # Works since Triton's broadcasting follows one of Numpy
+    if ACTIVATION == "gelu":
+        acc = gelu_k(acc)
     output_blck_ptr = output_ptr + n_offsets[:,None] * output_row_stride + m_offsets[None, :] * output_col_stride
     output_mask = (n_offsets[:,None] <n) & (m_offsets[None, :]<m)
     tl.store(output_blck_ptr, acc, mask=output_mask)
@@ -362,10 +379,24 @@ def t_matmul_t(a:torch.Tensor, b: torch.Tensor):
     assert a.is_contiguous(), "Matrix A must be contiguous" # TODO T: why do I need contiguous a?
     output = torch.empty((N, M), device=a.device)
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N']) * triton.cdiv(M, META['BLOCK_SIZE_M']), )
+
+    # One needs to tune params below depending on the size of input tensors 
+    BLOCK_SIZE_N = 128    
+    BLOCK_SIZE_M = 64
+    BLOCK_SIZE_K = 32
+    GROUP_SIZE_M = 8
+    num_stages = 3
+    num_warps = 8
+    assert triton.cdiv(N, BLOCK_SIZE_N) % GROUP_SIZE_M == 0, "Limtation of implementation" # TODO T: Complete implementation
+    assert triton.cdiv(M, BLOCK_SIZE_M) % GROUP_SIZE_M == 0, "Limtation of implementation" # TODO T: Complete implementation
+    
+
     t_matmul_k[grid](
-        a, b, output, 
+        a, b, output, None,
         a.stride(0), a.stride(1), b.stride(0), b.stride(1), output.stride(0), output.stride(1), 
-        N, M, K) 
+        N, M, K, ADD_BIAS=False, ACTIVATION = None,
+        BLOCK_SIZE_N=BLOCK_SIZE_N, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_K=BLOCK_SIZE_K, 
+        GROUP_SIZE_M=GROUP_SIZE_M, num_stages=num_stages, num_warps=num_warps)
     return output
     
 def t_linear_bkwd_p(layer_params, x): # input: N x D
@@ -487,6 +518,15 @@ def t_softmax_attn_fwd(q, k, mask, train, p_gen_aux=None):
     sa = t_dropout_fwd(sa, train, p_gen_aux)
     return sa
 
+def t_softmax_attn_fwd_t(q, k, mask, train, p_gen_aux=None):
+    D = q.shape[-1]
+    attn = torch.matmul(q, torch.transpose(k, -2, -1))
+    attn = attn / math.sqrt(D)
+    attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
+    sa = torch.exp(t_log_softmax_fwd_t(attn))
+    sa = t_dropout_fwd_t(sa, train, p_gen_aux)
+    return sa
+
 def t_softmax_attn_bkwd(q, k, mask, train, p_gen_aux=None):
     D = q.shape[-1]
     attn = torch.matmul(q, torch.transpose(k, -2, -1))
@@ -538,15 +578,178 @@ def t_softmax_attn_bkwd2(dloss_dx, q, k, mask, train, p_gen_aux=None):
     
     return dloss_dq, dloss_dk
 
+def t_softmax_attn_bkwd2_t(dloss_dx, q, k, mask, train, p_gen_aux=None):
+    D = q.shape[-1]
+    attn = torch.matmul(q, torch.transpose(k, -2, -1))
+    attn = attn / math.sqrt(D)
+    attn = torch.where(torch.unsqueeze(mask,dim=1), attn, torch.full_like(attn, -1e9)) # Note, instead of usign -jnp.inf, which results in NaNs (NIT: probably better to use jax.numpy.finfo)
+    # TODO XXX: would the below line cause numerical stabliity issues?
+    sa = torch.exp(t_log_softmax_fwd_t(attn)) 
+
+    # propagate back
+    dloss_dx = t_dropout_bkwd2_t(dloss_dx, sa, train, p_gen_aux)
+    dloss_dx = dloss_dx * sa #note, sa acts as jac_exp (exp is element-wise op). TODO: check if this is correct?
+    
+    # TODO XXX XXX : torch.func's jacrev/vjp give 2 different results,
+    # which, importantly, are different than my implementation.
+    # It's all in teh region of floating points errors..
+    #from torch.func import jacrev
+    #qk_t_bmm_fn = lambda q, k: torch.matmul(q, k.transpose(-2, -1))/math.sqrt(D)
+    #bmm_jac_k = jacrev(qk_t_bmm_fn, argnums=(1))(q, k)
+    #(_, vjpfunc) = torch.func.vjp(qk_t_bmm_fn, q, k) 
+    
+    dloss_dx = t_log_softmax_bkwd2_t(dloss_dx, attn)
+    dloss_dx = torch.where(torch.unsqueeze(mask,dim=1), dloss_dx, 0)
+    dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
+    #dloss_dk = _vjp_in_2d(dloss_dx, bmm_jac_k)
+    #dloss_dk = vjpfunc(dloss_dx)[1] # note, this also computes [0]...
+    dloss_dk = torch.einsum('abcd, abce->abde', dloss_dx/math.sqrt(D), q)
+    
+    return dloss_dq, dloss_dk
+
 def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
     softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train, p_gen_aux)
-    return torch.matmul(softmaxed_attn, v) # output: BS x N x D
+    return torch.matmul(softmaxed_attn, v) # output: BS x H x N x D
+
+# This will work for moderate size of D: it's tiling along N dimension of Q, and along N dimension of K_T&V.
+# It doesn't tile along D dimension.
+# Different program per BS_H item (reshape of BS and H in one dim, and one program per this dim)
+@triton.jit
+def t_scaled_dot_prod_attn_fwd3_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, acts0_ptr, acts1_ptr,
+                q_stride0, q_stride1, q_stride2, k_t_stride0, k_t_stride1, k_t_stride2,
+                v_stride0, v_stride1, v_stride2, mask_stride0, mask_stride1,
+                output_stride0, output_stride1, output_stride2, acts0_stride0, acts1_stride0,
+                train, p_gen_aux,
+                BS_H, N:tl.constexpr, D,
+                BLOCK_SIZE_Q_N: tl.constexpr, BLOCK_SIZE_K_T_N: tl.constexpr, BLOCK_SIZE_D: tl.constexpr,
+                Q_N_BLCKS: tl.constexpr,
+                num_stages: tl.constexpr
+                ):
+    # Matching PyTorch's fp32 dtype ( see https://github.com/triton-lang/triton/issues/4574)
+    ASM: tl.constexpr = "cvt.rna.tf32.f32 $0, $1;"
+    
+    sqrt_D = tl.sqrt(D.to(tl.float32)) # TODO T: extract from this method?
+    bs_h_start = tl.program_id(0)
+    bs_h_step = tl.num_programs(0)
+    for bs_h_pid in tl.range(bs_h_start, BS_H, bs_h_step, num_stages):
+        bs_h_q_ptr = q_ptr + bs_h_pid * q_stride0
+        bs_h_k_t_ptr = k_t_ptr + bs_h_pid * k_t_stride0    
+        bs_h_v_ptr = v_ptr + bs_h_pid * v_stride0        
+        bs_h_output_ptr = output_ptr + bs_h_pid * output_stride0
+        bs_h_acts0_ptr = acts0_ptr + bs_h_pid * acts0_stride0
+        bs_h_acts1_ptr = acts1_ptr + bs_h_pid * acts1_stride0     
+        
+        for q_n_step in tl.static_range(0, Q_N_BLCKS):          
+            q_n_offsets = q_n_step * BLOCK_SIZE_Q_N + tl.arange(0, BLOCK_SIZE_Q_N)            
+            d_offsets = tl.arange(0, BLOCK_SIZE_D)
+            # TODO T: Do I need modulo n, modulo m operations? 
+            q_n_offsets_mod = q_n_offsets % N
+            d_offsets_mod = d_offsets %D
+            
+            # Load Q blck once
+            q_blck_ptr = bs_h_q_ptr + q_n_offsets_mod[:,None] * q_stride1 + d_offsets_mod[None, :] * q_stride2
+            q_blck_mask = (q_n_offsets[:,None] < N) & (d_offsets[None, :] < D)
+            q_blck = tl.load(q_blck_ptr, mask=q_blck_mask, other=0.0) 
+            
+            # Use FlashAttention naming: ms - logits' max, ls - logit's sumexp
+            ms = tl.full((BLOCK_SIZE_Q_N, 1), -1e9, tl.float32)
+            ls = tl.zeros_like(ms)
+            output = tl.zeros((BLOCK_SIZE_Q_N, BLOCK_SIZE_D), dtype=tl.float32)
+            for k_t_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_K_T_N)):
+                k_t_n_offsets = k_t_n_step * BLOCK_SIZE_K_T_N + tl.arange(0, BLOCK_SIZE_K_T_N) 
+                k_t_n_offsets_mod = k_t_n_offsets % N
+                
+                # Q * K^T
+                k_blck_ptr = bs_h_k_t_ptr + d_offsets_mod[:,None] * k_t_stride1 + k_t_n_offsets_mod[None, :] * k_t_stride2
+                k_blck_mask = (d_offsets[:, None] < D) & (k_t_n_offsets[None, :] < N)
+                k_blck = tl.load(k_blck_ptr, mask=k_blck_mask, other=0.0)
+                # Matching PyTorch's fp32 dtype ( see https://github.com/triton-lang/triton/issues/4574)
+                q_blck = tl.inline_asm_elementwise(ASM, "=r, r", [q_blck], dtype=tl.float32, is_pure=True, pack=1)
+                k_blck = tl.inline_asm_elementwise(ASM, "=r, r", [k_blck], dtype=tl.float32, is_pure=True, pack=1)
+                acc = tl.dot(q_blck, k_blck)
+
+                # /sqrt(D) + Mask + Softmax + Dropout (with keeping updating ms&ls following FlashAttention's paper)
+                acc = acc / sqrt_D
+                mask_blck_ptr = mask_ptr + q_n_offsets_mod[:,None] * mask_stride0 + k_t_n_offsets_mod[None, :] * mask_stride1
+                mask_mask = (q_n_offsets[:,None] <N) & (k_t_n_offsets[None, :]<N)
+                mask_blck = tl.load(mask_blck_ptr, mask=mask_mask, other= 0.0)
+                acc = tl.where(mask_blck, acc, -1e9)
+                blck_ms = tl.max(acc, axis=1, keep_dims=True)
+                n_ms = tl.maximum(ms, blck_ms)
+                acc = tl.exp(acc - blck_ms)
+                blck_ls = tl.sum(acc, axis=1, keep_dims=True)       
+                n_ls = tl.exp(ms - n_ms) * ls + tl.exp(blck_ms - n_ms) * blck_ls
+                # TODO T: confirm that this is different enough seed per row (assumes that D_PID always equals to 0)
+                acc = dropout_k(acc, train, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
+
+                # * V
+                v_blck_ptr = bs_h_v_ptr + k_t_n_offsets_mod[:,None] * v_stride1 + d_offsets_mod[None, :] * v_stride2
+                v_blck_mask = (k_t_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
+                v_blck = tl.load(v_blck_ptr, mask=v_blck_mask, other=0.0)
+                v_blck = tl.inline_asm_elementwise(ASM, "=r, r", [v_blck], dtype=tl.float32, is_pure=True, pack=1)
+                
+                output = 1/n_ls * (ls * tl.exp(ms - n_ms) * output + tl.exp(blck_ms - n_ms) * tl.dot(acc, v_blck))
+                ms, ls = n_ms, n_ls
+                
+            tl.store(bs_h_acts0_ptr + q_n_offsets, ms.reshape(BLOCK_SIZE_Q_N), mask=q_n_offsets<N)
+            tl.store(bs_h_acts1_ptr + q_n_offsets, ls.reshape(BLOCK_SIZE_Q_N), mask=q_n_offsets<N)  
+            output_blck_ptr = bs_h_output_ptr + q_n_offsets[:,None] * output_stride1 + d_offsets[None, :] * output_stride2
+            output_mask = (q_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
+            tl.store(output_blck_ptr, output, mask=output_mask)
+    
+
+def t_scaled_dot_prod_attn_fwd3_t(qkv:torch.Tensor, mask:torch.Tensor, train=True, p_gen_aux=None):
+    q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
+    BS, H, N, D = q.shape
+    
+    q = q.reshape(BS*H, N, D)
+    k = k.reshape(BS*H, N, D)
+    v = v.reshape(BS*H, N, D)
+    mask = mask[0] # Asumme mask being the same across rows. TODO XXX: make that assumption throughput the code
+    
+    output = torch.zeros_like(q)
+    acts0 = torch.empty((BS*H, N), device=q.device)
+    acts1 = torch.empty_like(acts0)
+    
+    # TODO T: check if some matrices are contiguous?
+    grid = (min(BS*H, 80),)
+
+    # Tuned params given num_warps=8, and BS, H, N, D = 8, 12, 512, 64
+    num_warps = 8
+    num_stages = 2 # TODO T: I don't think this helps
+    BLOCK_SIZE_Q_N = 128
+    BLOCK_SIZE_K_T_N = 64
+    BLOCK_SIZE_D = triton.next_power_of_2(D)
+
+    if not train:
+        p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
+    k_t = torch.transpose(k, -2, -1)
+    t_scaled_dot_prod_attn_fwd3_k[grid](
+        q, k_t, v, mask, output, acts0, acts1,
+        q.stride(0), q.stride(1), q.stride(2), k_t.stride(0), k_t.stride(1), k_t.stride(2), 
+        v.stride(0), v.stride(1), v.stride(2),
+        mask.stride(0), mask.stride(1), output.stride(0), output.stride(1), output.stride(2),
+        acts0.stride(0), acts1.stride(0),
+        train, p_gen_aux,
+        BS*H, N, D,
+        BLOCK_SIZE_Q_N=BLOCK_SIZE_Q_N, BLOCK_SIZE_K_T_N = BLOCK_SIZE_K_T_N, BLOCK_SIZE_D=BLOCK_SIZE_D,
+        Q_N_BLCKS = triton.cdiv(N, BLOCK_SIZE_Q_N), # TODO T: Is there a way to do that cdiv inside kernel?
+        num_warps=num_warps, num_stages=num_stages)
+    
+    output = output.reshape(BS, H, N, D)
+    return output, [acts0.reshape(BS, H, N), acts1.reshape(BS, H, N), output]
 
 def t_scaled_dot_prod_attn_fwd3(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
     softmaxed_attn = t_softmax_attn_fwd(q, k, mask, train, p_gen_aux)
-    return torch.matmul(softmaxed_attn, v), [softmaxed_attn] # output: BS x N x D
+    return torch.matmul(softmaxed_attn, v), [softmaxed_attn] # output: BS x H x N x D
+
+# TODO: Remove
+def old_t_scaled_dot_prod_attn_fwd3_t(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
+    q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
+    softmaxed_attn = t_softmax_attn_fwd_t(q, k, mask, train, p_gen_aux)
+    return torch.matmul(softmaxed_attn, v), [softmaxed_attn] # output: BS x H x N x D
 
 def t_scaled_dot_prod_attn_bkwd(qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
     BS, H, _, N, D = qkv.shape
@@ -594,6 +797,197 @@ def t_scaled_dot_prod_attn_bkwd3(dloss_dx, acts, qkv, mask, train=True, p_gen_au
     
     return dloss_dq, dloss_dk, dloss_dv
 
+# TODO: Remove
+def old_t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv, mask, train=True, p_gen_aux=None): # inputs: BS x H x 3 x N x D, mask: BS x N(q) x N(k)
+    BS, H, _, N, D = qkv.shape
+    q, k, v = torch.unbind(qkv, dim=2)
+    sa = acts[0]
+    
+    # propagate back: bmm (i.e. sa * v)  + SA
+    dloss_dsa = torch.einsum(f'abcd, abed -> abce', dloss_dx, v)
+    dloss_dv = torch.einsum(f'abcd, abce -> abed', dloss_dx, sa)
+    dloss_dq, dloss_dk = t_softmax_attn_bkwd2_t(dloss_dsa, q, k, mask, train, p_gen_aux)
+    
+    return dloss_dq, dloss_dk, dloss_dv
+
+# This will work for moderate size of D: it's tiling along N dimension of Q, and along N dimension of K_T.
+# It doesn't tile along D dimension.
+# Different program per BS_H item (reshape of BS and H in one dim, and one program per this dim)
+@triton.jit
+def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_ptr, mask_ptr, acts0_ptr, acts1_ptr,
+                dloss_dq_ptr, dloss_dk_ptr, dloss_dv_ptr,
+                dloss_dx_stride0, dloss_dx_stride1, dloss_dx_stride2,
+                q_stride0, q_stride1, q_stride2, k_t_stride0, k_t_stride1, k_t_stride2,
+                v_stride0, v_stride1, v_stride2, output_stride0, output_stride1, output_stride2, 
+                mask_stride0, mask_stride1, acts0_stride0, acts1_stride0,
+                dloss_dq_stride0, dloss_dq_stride1, dloss_dq_stride2,                                                                      
+                dloss_dk_stride0, dloss_dk_stride1, dloss_dk_stride2,                                   
+                dloss_dv_stride0, dloss_dv_stride1, dloss_dv_stride2,
+                train, p_gen_aux,
+                BS_H, N, D,
+                BLOCK_SIZE_Q_N: tl.constexpr, BLOCK_SIZE_K_T_N: tl.constexpr, BLOCK_SIZE_D: tl.constexpr,
+                num_stages: tl.constexpr
+                ):
+    # Matching PyTorch's fp32 dtype ( see https://github.com/triton-lang/triton/issues/4574)
+    ASM: tl.constexpr = "cvt.rna.tf32.f32 $0, $1;"
+    
+    sqrt_D = tl.sqrt(D.to(tl.float32)) # TODO T: extract from this method?
+    bs_h_start = tl.program_id(0)
+    bs_h_step = tl.num_programs(0)
+    for bs_h_pid in tl.range(bs_h_start, BS_H, bs_h_step, num_stages):
+        bs_h_dloss_dx_ptr = dloss_dx_ptr + bs_h_pid * dloss_dx_stride0      
+        bs_h_q_ptr = q_ptr + bs_h_pid * q_stride0
+        bs_h_k_t_ptr = k_t_ptr + bs_h_pid * k_t_stride0    
+        bs_h_v_ptr = v_ptr + bs_h_pid * v_stride0        
+        bs_h_output_ptr = output_ptr + bs_h_pid * output_stride0        
+        bs_h_acts0_ptr = acts0_ptr + bs_h_pid * acts0_stride0           
+        bs_h_acts1_ptr = acts1_ptr + bs_h_pid * acts1_stride0                   
+        bs_h_dloss_dq_ptr = dloss_dq_ptr + bs_h_pid * dloss_dq_stride0
+        bs_h_dloss_dk_ptr = dloss_dk_ptr + bs_h_pid * dloss_dk_stride0
+        bs_h_dloss_dv_ptr = dloss_dv_ptr + bs_h_pid * dloss_dv_stride0
+
+        d_offsets = tl.arange(0, BLOCK_SIZE_D)
+        d_offsets_mod = d_offsets %D
+        
+        for k_t_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_K_T_N)):
+            
+            # Load K_T and V blcks
+            k_t_n_offsets = k_t_n_step * BLOCK_SIZE_K_T_N + tl.arange(0, BLOCK_SIZE_K_T_N) 
+            k_t_n_offsets_mod = k_t_n_offsets % N
+            k_blck_ptr = bs_h_k_t_ptr + d_offsets_mod[:,None] * k_t_stride1 + k_t_n_offsets_mod[None, :] * k_t_stride2
+            k_blck_mask = (d_offsets[:, None] < D) & (k_t_n_offsets[None, :] < N)
+            k_blck = tl.load(k_blck_ptr, mask=k_blck_mask, other=0.0) # TODO T: rename to k_t_blck!
+            k_blck = tl.inline_asm_elementwise(ASM, "=r, r", [k_blck], dtype=tl.float32, is_pure=True, pack=1)
+            v_blck_ptr = bs_h_v_ptr + k_t_n_offsets_mod[:,None] * v_stride1 + d_offsets_mod[None, :] * v_stride2
+            v_blck_mask = (k_t_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
+            v_blck = tl.load(v_blck_ptr, mask=v_blck_mask, other=0.0)
+            v_blck = tl.inline_asm_elementwise(ASM, "=r, r", [v_blck], dtype=tl.float32, is_pure=True, pack=1)
+            
+            dloss_dk_blck = tl.zeros((BLOCK_SIZE_K_T_N, BLOCK_SIZE_D), dtype=tl.float32)
+            dloss_dv_blck = tl.zeros((BLOCK_SIZE_K_T_N, BLOCK_SIZE_D), dtype=tl.float32)   
+            
+            # ASSUMES CAUSAL MASK FOR NOW 
+            # This is somehow limited suppport for now. I only tested this for
+            # a) BLOCK_SIZE_K_T_N = BLOCK_SIZE_Q_N and BLOCK_SIZE_K_T_N = 2x BLOCK_SIZE_Q_N
+            q_n_step_start = max(0, k_t_n_step * tl.cdiv(BLOCK_SIZE_K_T_N,BLOCK_SIZE_Q_N))
+            
+            for q_n_step in range(q_n_step_start, tl.cdiv(N, BLOCK_SIZE_Q_N)):          
+                q_n_offsets = q_n_step * BLOCK_SIZE_Q_N + tl.arange(0, BLOCK_SIZE_Q_N)            
+                q_n_offsets_mod = q_n_offsets % N # TODO T: Do I need modulo n, modulo m operations? 
+
+                # Load Q blck
+                q_blck_ptr = bs_h_q_ptr + q_n_offsets_mod[:,None] * q_stride1 + d_offsets_mod[None, :] * q_stride2
+                q_blck_mask = (q_n_offsets[:,None] < N) & (d_offsets[None, :] < D)
+                q_blck = tl.load(q_blck_ptr, mask=q_blck_mask, other=0.0)
+                q_blck = tl.inline_asm_elementwise(ASM, "=r, r", [q_blck], dtype=tl.float32, is_pure=True, pack=1)
+
+                # Load softmax logits' max and sumexp
+                attn_max = tl.load(bs_h_acts0_ptr+ q_n_offsets_mod, mask=q_n_offsets < N, other=-1e9)
+                attn_max = attn_max.expand_dims(1)
+                attn_logits_sumexp = tl.load(bs_h_acts1_ptr+ q_n_offsets_mod, mask=q_n_offsets < N, other=0.0)            
+                attn_logits_sumexp = attn_logits_sumexp.expand_dims(1)
+
+                # Precompute row-wise sum of dloss_dx * output
+                dloss_dx_blck_ptr = bs_h_dloss_dx_ptr + q_n_offsets_mod[:,None] * dloss_dx_stride1 + d_offsets_mod[None, :] * dloss_dx_stride2
+                dloss_dx_blck_mask = (q_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
+                input_dloss_dx_blck = tl.load(dloss_dx_blck_ptr, mask=dloss_dx_blck_mask, other=0.0)
+                input_dloss_dx_blck = tl.inline_asm_elementwise(ASM, "=r, r", [input_dloss_dx_blck], dtype=tl.float32, is_pure=True, pack=1)
+                output_blck_ptr = bs_h_output_ptr + q_n_offsets_mod[:,None] * output_stride1 + d_offsets_mod[None, :] * output_stride2
+                output_blck_mask = (q_n_offsets[:, None] < N) & (d_offsets[None, :]<D)
+                output_blck = tl.load(output_blck_ptr, mask=output_blck_mask, other=0.0)
+                output_blck = tl.inline_asm_elementwise(ASM, "=r, r", [output_blck], dtype=tl.float32, is_pure=True, pack=1)
+                rowise_dloss_dx_output_sum = tl.sum(input_dloss_dx_blck * output_blck, axis=1, keep_dims=True)
+
+                # Compute "Q * K^T / sqrt(D) + Mask + Softmax + Dropout", and backpropagate
+                attn = tl.dot(q_blck, k_blck) / sqrt_D
+                mask_blck_ptr = mask_ptr + q_n_offsets_mod[:,None] * mask_stride0 + k_t_n_offsets_mod[None, :] * mask_stride1
+                mask_mask = (q_n_offsets[:,None] <N) & (k_t_n_offsets[None, :]<N)
+                mask_blck = tl.load(mask_blck_ptr, mask=mask_mask, other= 0.0)
+                attn = tl.where(mask_blck, attn, -1e9)
+                sa_pre_dropout = tl.exp(attn - attn_max)/attn_logits_sumexp
+                # TODO T: confirm that this is different enough seed per row (assumes that D_PID always equals to 0)
+                sa = dropout_k(sa_pre_dropout, train, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
+
+                # Propagate back
+                # dloss_dv=torch.einsum(f'cd, ce -> ed', dloss_dx, sa), dloss_dx is Q_N x D, sa is Q_N x K_T_N
+                dloss_dv_blck = tl.dot(tl.trans(sa), input_dloss_dx_blck, dloss_dv_blck)
+                # dloss_dx = torch.einsum(f'cd, ed -> ce', dloss_dx, v)
+                dloss_dx_blck = tl.dot(input_dloss_dx_blck, tl.trans(v_blck)) 
+                dloss_dx_blck = dloss_dx_blck * sa + rowise_dloss_dx_output_sum * -sa_pre_dropout
+                # TODO T: For small speedup, replace the above with: (we need an access to zs though)
+                #dloss_dx_blck = sa_pre_dropout * ( dloss_dx_blck * zs - rowise_dloss_dx_output_sum)
+                dloss_dx_blck = tl.where(mask_blck, dloss_dx_blck, 0) # Q_N x K_T_N
+                # dloss_dq = torch.matmul(dloss_dx, k/math.sqrt(D))
+                dloss_dq_blck = tl.dot(dloss_dx_blck, tl.trans(k_blck)/sqrt_D) # TODO T: rename k_blck into k_t_blck!
+                dloss_dq_mask = (q_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
+                dloss_dq_blck_ptr = bs_h_dloss_dq_ptr + q_n_offsets[:,None] * dloss_dq_stride1 + d_offsets[None, :] * dloss_dq_stride2                
+                tl.atomic_add(dloss_dq_blck_ptr, dloss_dq_blck, mask=dloss_dq_mask)                
+                # dloss_dk = torch.einsum('abcd, abce->abde', dloss_dx/math.sqrt(D), q)
+                dloss_dk_blck = tl.dot(tl.trans(dloss_dx_blck)/sqrt_D, q_blck, dloss_dk_blck)
+            
+            dloss_dv_blck_ptr = bs_h_dloss_dv_ptr + k_t_n_offsets[:,None] * dloss_dv_stride1 + d_offsets[None, :] * dloss_dv_stride2
+            dloss_dv_mask = (k_t_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
+            tl.store(dloss_dv_blck_ptr, dloss_dv_blck, mask=dloss_dv_mask)
+            
+            dloss_dk_blck_ptr = bs_h_dloss_dk_ptr + k_t_n_offsets[:,None] * dloss_dk_stride1 + d_offsets[None, :] * dloss_dk_stride2                
+            dloss_dk_mask = (k_t_n_offsets[:,None] <N) & (d_offsets[None, :]<D)
+            tl.store(dloss_dk_blck_ptr, dloss_dk_blck, mask=dloss_dk_mask)
+                
+
+def t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torch.Tensor, train=True, p_gen_aux=None):
+    q, k, v = torch.unbind(qkv, dim=2) # BS x H x N x D
+    BS, H, N, D = q.shape
+    
+    dloss_dx = dloss_dx.reshape(BS*H, N, D)
+    q = q.reshape(BS*H, N, D)
+    k = k.reshape(BS*H, N, D)
+    v = v.reshape(BS*H, N, D)
+    mask = mask[0] # Asumme mask being the same across rows. TODO XXX: make that assumption throughput the code
+    acts0, acts1, output = acts
+    acts0 = acts0.reshape(BS*H, N)
+    acts1 = acts1.reshape(BS*H, N)    
+    output = output.reshape(BS*H, N, D)
+    
+    dloss_dq = torch.zeros_like(q)
+    dloss_dk = torch.zeros_like(k)
+    dloss_dv = torch.zeros_like(v)    
+    
+    # TODO T: check if some matrices are contiguous?
+    grid = (min(BS*H, 80),) # TODO T: We can bump it up to 160?
+
+    # Tuned params given num_warps=8, and BS, H, N, D = 8, 12, 512, 64
+    num_warps = 8
+    num_stages = 2 # TODO T: I don't think this helps
+    # TODO T: We have more memory to use, but smaller block_size use sparsity of causal mask better
+    BLOCK_SIZE_Q_N = 32  
+    BLOCK_SIZE_K_T_N = 32 
+    BLOCK_SIZE_D = triton.next_power_of_2(D)
+    
+    # We enforce causal masking for now, but the assert below cost too much perf
+    #assert torch.allclose(mask, torch.tril(torch.ones((N, N), device=mask.device, dtype=torch.bool))), "Assumes causal mask"
+    assert BLOCK_SIZE_K_T_N>= BLOCK_SIZE_Q_N, "Due to the limited support for levarging causal mask"
+
+    if not train:
+        p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
+    k_t = torch.transpose(k, -2, -1)
+    t_scaled_dot_prod_attn_bkwd3_k[grid](
+        dloss_dx, q, k_t, v, output, mask, acts0, acts1,
+        dloss_dq, dloss_dk, dloss_dv,
+        dloss_dx.stride(0), dloss_dx.stride(1), dloss_dx.stride(2),
+        q.stride(0), q.stride(1), q.stride(2), k_t.stride(0), k_t.stride(1), k_t.stride(2), 
+        v.stride(0), v.stride(1), v.stride(2),
+        output.stride(0), output.stride(1), output.stride(2),        
+        mask.stride(0), mask.stride(1), acts0.stride(0), acts1.stride(0),
+        dloss_dq.stride(0), dloss_dq.stride(1), dloss_dq.stride(2),        
+        dloss_dk.stride(0), dloss_dk.stride(1), dloss_dk.stride(2),
+        dloss_dv.stride(0), dloss_dv.stride(1), dloss_dv.stride(2),
+        train, p_gen_aux,
+        BS*H, N, D,
+        BLOCK_SIZE_Q_N=BLOCK_SIZE_Q_N, BLOCK_SIZE_K_T_N = BLOCK_SIZE_K_T_N, BLOCK_SIZE_D=BLOCK_SIZE_D,
+        num_warps=num_warps, num_stages=num_stages)
+    
+    return dloss_dq.reshape(BS, H, N, D), dloss_dk.reshape(BS, H, N, D), dloss_dv.reshape(BS, H, N, D)
+
 # TODO XXX: Remove below
 # TODO XXX: Support for heads>1
 # TODO XXX: replace mult with the generic newer _mult
@@ -638,6 +1032,12 @@ def t_tlayer_attn_heads_fwd3(layer_params, qkv, mask, train, p_gen_aux=None): # 
     
     proj_qkv = t_proj_fwd(layer_params, torch.unsqueeze(qkv, 1)) # batch_size x heads x 3 x seq_len x emb_dim
     return t_scaled_dot_prod_attn_fwd3(proj_qkv, mask, train, p_gen_aux)
+
+def t_tlayer_attn_heads_fwd3_t(layer_params, qkv, mask, train, p_gen_aux=None): # params: H x 3 x D/H x D, input: BS x N x D
+    qkv = torch.stack(qkv,dim=-3) # batch_size x 3 x seq_len x emb_dim
+    
+    proj_qkv = t_proj_fwd(layer_params, torch.unsqueeze(qkv, 1)) # batch_size x heads x 3 x seq_len x emb_dim
+    return t_scaled_dot_prod_attn_fwd3_t(proj_qkv, mask, train, p_gen_aux)
 
 def t_tlayer_attn_heads_bkwd_p(layer_params, qkv, mask, train, p_gen_aux=None): # params: heads x 3 x emb_dim/heads x emb_dim, input: batch_size x seq_len x emb_dim
     qkv = torch.stack(qkv,dim=-3).unsqueeze(1)
@@ -709,6 +1109,19 @@ def t_tlayer_attn_heads_bkwd3(dloss_dx, acts, layer_params, qkv, mask, train, p_
     
     return dloss_dqkv, dloss_dp
 
+def t_tlayer_attn_heads_bkwd3_t(dloss_dx, acts, layer_params, qkv, mask, train, p_gen_aux=None): # params: H x 3 x D/H x D, input: BS x S x D
+    qkv = torch.stack(qkv,dim=-3).unsqueeze(1)
+    proj_qkv = t_proj_fwd(layer_params, qkv)
+    
+    # propagate back
+    dloss_dx = t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, proj_qkv, mask, train, p_gen_aux)
+    dloss_dx = torch.stack(dloss_dx, dim=-3)
+    dloss_dp = t_proj_bkwd2_p(dloss_dx, layer_params, qkv)
+    dloss_dx = t_proj_bkwd2_x(dloss_dx, layer_params, qkv)
+    dloss_dqkv = dloss_dx.squeeze(-4).unbind(-3)
+    
+    return dloss_dqkv, dloss_dp
+
 def t_tlayer_attn_fwd(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
     heads_attns = t_tlayer_attn_heads_fwd(layer_params[0], qkv, mask, train, p_gen_aux)
     BS, H, N, D = heads_attns.shape
@@ -717,6 +1130,12 @@ def t_tlayer_attn_fwd(layer_params, qkv, mask, train, p_gen_aux=None): # input: 
 
 def t_tlayer_attn_fwd3(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
     heads_attns, acts = t_tlayer_attn_heads_fwd3(layer_params[0], qkv, mask, train, p_gen_aux)
+    BS, H, N, D = heads_attns.shape
+    attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
+    return t_proj_fwd(layer_params[-1], attn), [acts, heads_attns]
+
+def t_tlayer_attn_fwd3_t(layer_params, qkv, mask, train, p_gen_aux=None): # input: batch_size x seq_len x emb_dim
+    heads_attns, acts = t_tlayer_attn_heads_fwd3_t(layer_params[0], qkv, mask, train, p_gen_aux)
     BS, H, N, D = heads_attns.shape
     attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
     return t_proj_fwd(layer_params[-1], attn), [acts, heads_attns]
@@ -795,11 +1214,89 @@ def t_tlayer_attn_bkwd3(dloss_dx, acts, layer_params, qkv, mask, train, p_gen_au
     
     return dloss_dx, (heads_attns_dloss_dp, proj_dloss_dp)
 
+def t_tlayer_attn_bkwd3_t(dloss_dx, acts, layer_params, qkv, mask, train, p_gen_aux=None): # input: BS x N x D
+    heads_attns = acts[-1]
+    BS, H, N, D = heads_attns.shape
+    attn = heads_attns.transpose(1, 2).reshape((BS, N, -1)) # Swap H and N, then flatten H+D
+    
+    # propagate back
+    proj_dloss_dp = t_proj_bkwd2_p(dloss_dx, layer_params[-1], attn)
+    dloss_dx = t_proj_bkwd2_x(dloss_dx, layer_params[-1], attn)
+    dloss_dx = dloss_dx.reshape(BS, N, H, D).transpose(1, 2) # unflatten H+D, then swap back H and N
+    dloss_dx, heads_attns_dloss_dp = t_tlayer_attn_heads_bkwd3_t(dloss_dx, acts[-2], layer_params[0], qkv, mask, train, p_gen_aux)
+    
+    return dloss_dx, (heads_attns_dloss_dp, proj_dloss_dp)
+
 def t_tlayer_ffn_fwd(layer_params, x, activation_fn): # input: seq_len x emb_dim
     x = t_linear_fwd((layer_params[0], layer_params[1]), x)
     x = activation_fn(x)
     x = t_linear_fwd((layer_params[2], layer_params[3]), x)
     return x
+
+# TODO T: This is slower than the baseline above when used in the training script.
+# In isolation (i.e. outisde the training script), this is slightly faster than the above,
+# but slower than JIT's version of the above. Furthermore, individual linear layers
+# are faster using the matmul kernel than t_linear_fwd (whether it's jited or not).
+# We should do the following:
+# 1. Fix grouping in matmul to improve L2 cache rate
+# 2. Investigate whether slowness is due to kernel launch (check cuda graph or even persistent kernel)
+# 3. Fuse both linear layers together, which is probably what JIT is capable of doing
+def t_tlayer_ffn_fwd_t(layer_params, x:torch.Tensor, activation_fn):
+    assert activation_fn == t_gelu_fwd
+    
+    # FFN1
+    output_dim = x.shape
+    x = x.view((-1,x.shape[-1]))
+    N, K = x.shape
+    p0 = layer_params[0].t()
+    K2, M = p0.shape
+    assert K==K2
+    assert x.is_contiguous(), "Matrix A must be contiguous" # TODO T: why do I need contiguous a?
+    mid_output = torch.empty((N, M), device=x.device)
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N']) * triton.cdiv(M, META['BLOCK_SIZE_M']), )
+
+    # One needs to tune params below depending on the size of input tensors 
+    BLOCK_SIZE_N = 128    
+    BLOCK_SIZE_M = 64
+    BLOCK_SIZE_K = 32
+    GROUP_SIZE_M = 8
+    num_stages = 3
+    num_warps = 8
+    assert triton.cdiv(N, BLOCK_SIZE_N) % GROUP_SIZE_M == 0, "Limtation of implementation" # TODO T: Complete implementation
+    assert triton.cdiv(M, BLOCK_SIZE_M) % GROUP_SIZE_M == 0, "Limtation of implementation" # TODO T: Complete implementation
+
+    t_matmul_k[grid](
+        x, p0, mid_output, layer_params[1], 
+        x.stride(0), x.stride(1), p0.stride(0), p0.stride(1), mid_output.stride(0), mid_output.stride(1), 
+        N, M, K, ADD_BIAS=True, ACTIVATION = "gelu", 
+        BLOCK_SIZE_N=BLOCK_SIZE_N, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_K=BLOCK_SIZE_K, 
+        GROUP_SIZE_M=GROUP_SIZE_M, num_stages=num_stages, num_warps=num_warps)
+
+    # FFN2: Note the swap of dimensions (K and M)
+    p2 = layer_params[2].t()
+    assert mid_output.is_contiguous(), "Matrix A must be contiguous" # TODO T: why do I need contiguous a?
+    output = torch.empty((N, K), device=x.device) 
+    
+    # One needs to tune params below depending on the size of input tensors 
+    BLOCK_SIZE_N = 128    
+    BLOCK_SIZE_M = 64
+    BLOCK_SIZE_K = 32
+    GROUP_SIZE_M = 4 # TODO T: Bump up once we fix grouping?
+    num_stages = 3
+    num_warps = 8
+    assert triton.cdiv(N, BLOCK_SIZE_N) % GROUP_SIZE_M == 0, "Limtation of implementation" # TODO T: Complete implementation
+    assert triton.cdiv(K, BLOCK_SIZE_M) % GROUP_SIZE_M == 0, "Limtation of implementation" # TODO T: Complete implementation
+
+    
+    t_matmul_k[grid](
+        mid_output, p2, output, layer_params[3],
+        mid_output.stride(0), mid_output.stride(1), p2.stride(0), p2.stride(1), output.stride(0), output.stride(1), 
+        N, K, M, ADD_BIAS=True, ACTIVATION = None, 
+        BLOCK_SIZE_N=BLOCK_SIZE_N, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_K=BLOCK_SIZE_K, 
+        GROUP_SIZE_M=GROUP_SIZE_M, num_stages=num_stages, num_warps=num_warps)
+    
+    
+    return output.view(output_dim)
 
 def t_tlayer_ffn_fwd3(layer_params, x, activation_fn): # input: seq_len x emb_dim
     x = t_linear_fwd((layer_params[0], layer_params[1]), x)
@@ -896,6 +1393,26 @@ def t_tlayer_ffn_bkwd2(dloss_dx, layer_params, x, activation_fn):
 
     return dloss_dx_2d.reshape(x.shape), tuple(ffn1_dloss_dp+ffn2_dloss_dp)
 
+def t_tlayer_ffn_bkwd2_t(dloss_dx, layer_params, x, activation_fn):
+    x_2d = x.reshape((-1, x.shape[-1]))
+    # note, t_relu_bkwd2 is not implemented yet
+    act_fn_bkwd2 = t_gelu_bkwd2_t if activation_fn==t_gelu_fwd else t_relu_bkwd2 
+    
+    x_2d_in0 = x_2d
+    x_2d = t_linear_fwd((layer_params[0], layer_params[1]), x_2d)
+    x_2d_in1 = x_2d
+    x_2d = activation_fn(x_2d)
+    
+    # propagate back
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    ffn2_dloss_dp = t_linear_bkwd2_p(dloss_dx_2d, (layer_params[2], layer_params[3]), x_2d)
+    dloss_dx_2d = t_linear_bkwd2_x(dloss_dx_2d, (layer_params[2], layer_params[3]), x_2d)
+    dloss_dx_2d = act_fn_bkwd2(dloss_dx_2d, x_2d_in1)
+    ffn1_dloss_dp = t_linear_bkwd2_p(dloss_dx_2d, (layer_params[0], layer_params[1]), x_2d_in0)
+    dloss_dx_2d = t_linear_bkwd2_x(dloss_dx_2d, (layer_params[0], layer_params[1]), x_2d_in0)
+
+    return dloss_dx_2d.reshape(x.shape), tuple(ffn1_dloss_dp+ffn2_dloss_dp)
+
 def t_tlayer_ffn_bkwd3(dloss_dx, acts, layer_params, x, activation_fn):
     x_2d = x.reshape((-1, x.shape[-1]))
     # note, t_relu_bkwd2 is not implemented yet
@@ -928,6 +1445,16 @@ def t_dropout_fwd(x, train=True, p_gen_aux=None):
 
 # TODO T: Think how to unify it with DROPOUT_RATE global variable above
 T_DROPOUT_RATE: triton.language.constexpr = 0.1
+    
+@triton.jit
+def dropout_k(x, train, p_gen_aux, offsets):
+    if train:
+        random = tl.rand(p_gen_aux, offsets) 
+        x_mask = random>T_DROPOUT_RATE
+        output = tl.where(x_mask, x, 0.0)  
+    else:
+        output = x * (1-T_DROPOUT_RATE)
+    return output
 
 # Note that the kernel assumes that n_cols < BLOCK_SIZE
 @triton.jit
@@ -949,13 +1476,8 @@ def t_dropout_fwd_k(x_ptr,
         offsets = tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_cols
         x = tl.load(x_row_start_ptr + offsets, mask=mask, other=0.0)
-        if train:
-            # TODO T: confirm that this is different enough seed per row
-            random = tl.rand(p_gen_aux+row_idx, offsets) 
-            x_mask = random>T_DROPOUT_RATE
-            output = tl.where(x_mask, x, 0.0)  
-        else:
-            output = x * (1-T_DROPOUT_RATE)
+        # TODO T: confirm that this is different enough seed per row
+        output = dropout_k(x, train, p_gen_aux+row_idx, offsets)
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
     
@@ -967,9 +1489,7 @@ def t_dropout_fwd_t(x: torch.Tensor, train=True, p_gen_aux=None):
     # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
     num_warps = 8
     num_stages = 2
-    num_programs = min(n_rows, 480) 
-    if not train:
-        p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
+    num_programs = min(n_rows, 480)
     t_dropout_fwd_k[(num_programs,)](x_2d, train, p_gen_aux, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
     return output.reshape(x.shape)
 
@@ -992,6 +1512,16 @@ def t_dropout_bkwd2(dloss_dx, x, train=True, p_gen_aux=None):
     mask = torch.bernoulli(torch.full_like(x, 1-DROPOUT_RATE), generator=generator) 
     return dloss_dx * mask
 
+@triton.jit
+def dropout_bkwd2_k(dloss_dx, train, p_gen_aux, offsets):
+    if train:
+        random = tl.rand(p_gen_aux, offsets) # TODO T: Is this enough as diff seed per row?
+        x_mask = random>T_DROPOUT_RATE
+        output = tl.where(x_mask, dloss_dx, 0.0)  
+    else:
+        output = dloss_dx * (1-T_DROPOUT_RATE)
+    return output
+    
 # Note that the kernel assumes that n_cols < BLOCK_SIZE
 @triton.jit
 def t_dropout_bkwd2_k(dloss_dx_ptr,
@@ -1012,12 +1542,7 @@ def t_dropout_bkwd2_k(dloss_dx_ptr,
         offsets = tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_cols
         dloss_dx = tl.load(dloss_dx_row_start_ptr + offsets, mask=mask, other=0.0)
-        if train:
-            random = tl.rand(p_gen_aux+row_idx, offsets) # TODO T: Is this enough as diff seed per row?
-            x_mask = random>T_DROPOUT_RATE
-            output = tl.where(x_mask, dloss_dx, 0.0)  
-        else:
-            output = dloss_dx * (1-T_DROPOUT_RATE)
+        output = dropout_bkwd2_k(dloss_dx, train, p_gen_aux+row_idx, offsets)
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
     
@@ -1029,7 +1554,7 @@ def t_dropout_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor, train=True, p_gen
     # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
     num_warps = 8
     num_stages = 2
-    num_programs = min(n_rows, 480) 
+    num_programs = min(n_rows, 480)
     t_dropout_bkwd2_k[(num_programs,)](dloss_dx_2d, train, p_gen_aux, output, dloss_dx_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
     return output.reshape(dloss_dx.shape)
 
@@ -1141,7 +1666,6 @@ def t_layernorm_bkwd2_p_k(dloss_dx_ptr,
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_cols
     
-    # TODO T: how much this is being reused?
     _output1 = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
     _output2 = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
         
@@ -1165,7 +1689,8 @@ def t_layernorm_bkwd2_p_k(dloss_dx_ptr,
         
         _output1 += dloss_dx * x_norm
         _output2 += dloss_dx
-    
+
+    # TODO T: Should we add parallel reduction strategy here: save to partial GROUP_SIZE_M sums first, before summing it up?
     tl.atomic_add(output1_ptr + offsets, _output1, mask=mask)
     tl.atomic_add(output2_ptr + offsets, _output2, mask=mask)    
     
@@ -1175,8 +1700,6 @@ def t_layernorm_bkwd2_p_t(dloss_dx:torch.Tensor, layer_params: torch.Tensor, x: 
     x_2d = x.reshape((-1, x.shape[-1])) 
     n_rows, n_cols = x_2d.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols) 
-    #output1 = torch.empty_like(layer_params[0])
-    #output2 = torch.empty_like(layer_params[1])
     output1 = torch.zeros_like(layer_params[0])
     output2 = torch.zeros_like(layer_params[1])    
     
@@ -1349,6 +1872,18 @@ def t_gpt2_tlayer_sublock1_fwd3(layer_params, y, mask, train=True, p_gen_aux=Non
     y = y + t_dropout_fwd(y_diff, train, p_gen_aux[1])
     return y, acts
 
+def t_gpt2_tlayer_sublock1_fwd3_t(layer_params, y, mask, train=True, p_gen_aux=None):
+    if not train:
+        p_gen_aux = [0, 0] # Mock values for Triton compilation
+        
+    y_diff = t_layernorm_fwd_t(layer_params[:2], y)
+    y_diff1 = y_diff
+    y_diff, y_diff_acts = t_tlayer_attn_fwd3_t(layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    acts = [(y_diff1, y_diff_acts)]
+    acts.append(y_diff)    
+    y = y + t_dropout_fwd_t(y_diff, train, p_gen_aux[1])
+    return y, acts
+
 def t_gpt2_tlayer_sublock1_bkwd_p(layer_params, y, mask, train=True, p_gen_aux=None): # input: seq_len x emb_dim
     if not train:
         p_gen_aux = [None, None]
@@ -1468,6 +2003,26 @@ def t_gpt2_tlayer_sublock1_bkwd3(dloss_dx, acts, layer_params, y, mask, train=Tr
     dloss_dp = layernorm_dloss_dp + tlayer_attn_dloss_dp
     
     return dloss_dx, dloss_dp
+
+def t_gpt2_tlayer_sublock1_bkwd3_t(dloss_dx, acts, layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
+    if not train:
+        p_gen_aux = [0, 0] # Mock values for Triton compilation
+        
+    blck_dloss_dx = dloss_dx
+    y_diff = acts[0][0]
+    y_diff_attn = acts[1]
+
+    # propagate back
+    dloss_dx = t_dropout_bkwd2_t(dloss_dx, y_diff_attn, train, p_gen_aux[1])
+    dloss_dx, tlayer_attn_dloss_dp = t_tlayer_attn_bkwd3_t(dloss_dx, acts[0][1], layer_params[2:], (y_diff, y_diff, y_diff), mask, train, p_gen_aux[0])
+    dloss_dx = torch.stack(dloss_dx).sum(dim=0)
+    layernorm_dloss_dp = t_layernorm_bkwd2_p_t(dloss_dx, layer_params[:2], y)
+    dloss_dx = t_layernorm_bkwd2_x_t(dloss_dx, layer_params[:2], y)
+    # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
+    dloss_dx = blck_dloss_dx + dloss_dx
+    dloss_dp = layernorm_dloss_dp + tlayer_attn_dloss_dp
+    
+    return dloss_dx, dloss_dp
     
 def t_gpt2_tlayer_sublock2_fwd(layer_params, y, train=True, p_gen_aux=None):
     y_diff = t_layernorm_fwd(layer_params[:-4], y)
@@ -1485,6 +2040,19 @@ def t_gpt2_tlayer_sublock2_fwd3(layer_params, y, train=True, p_gen_aux=None):
     #y_diff, ffn_acts = t_tlayer_ffn_fwd3(layer_params[-4:], y_diff, t_gelu_fwd)
     #acts.append((y_diff, ffn_acts))
     y = y + t_dropout_fwd(y_diff, train, p_gen_aux)
+    return y, acts
+
+def t_gpt2_tlayer_sublock2_fwd3_t(layer_params, y, train=True, p_gen_aux=None):
+    y_diff = t_layernorm_fwd_t(layer_params[:-4], y)
+    acts = [y_diff]
+    y_diff = t_tlayer_ffn_fwd(layer_params[-4:], y_diff, t_gelu_fwd_t)
+    acts.append(y_diff)
+    # TODO XXX XXX: The below line (i.e. with activation checkpointing) is not faster (due to reshapes?)
+    # Remember to stick to acts convention: each element of acts should represent single op's acts and input,
+    # so we should create a tuple of ("y_diff from above", ffn_acts) as first element of acts.
+    #y_diff, ffn_acts = t_tlayer_ffn_fwd3(layer_params[-4:], y_diff, t_gelu_fwd)
+    #acts.append((y_diff, ffn_acts))
+    y = y + t_dropout_fwd_t(y_diff, train, p_gen_aux)
     return y, acts
 
 def t_gpt2_tlayer_sublock2_bkwd_p(layer_params, y, train=True, p_gen_aux=None): # input: seq_len x emb_dim
@@ -1590,6 +2158,26 @@ def t_gpt2_tlayer_sublock2_bkwd3(dloss_dx, acts, layer_params, y, train=True, p_
     
     return dloss_dx, dloss_dp
 
+def t_gpt2_tlayer_sublock2_bkwd3_t(dloss_dx, acts, layer_params, y, train=True, p_gen_aux=None): # input: N x D
+    blck_dloss_dx = dloss_dx
+    
+    y_diff = acts[0]
+    y_diff_ffn = acts[1]
+    #y_diff_ffn = acts[1][0] (with activation checkpointing)
+    
+    # propagate back
+    dloss_dx = t_dropout_bkwd2_t(dloss_dx, y_diff_ffn, train, p_gen_aux)
+    dloss_dx, tlayer_ffn_dloss_dp = t_tlayer_ffn_bkwd2_t(dloss_dx, layer_params[2:], y_diff, t_gelu_fwd)
+    # TODO XXX XXX: The below line (i.e. with activation checkpointing) is not faster (due to reshapes?)
+    #dloss_dx, tlayer_ffn_dloss_dp = t_tlayer_ffn_bkwd3(dloss_dx, acts[1][1], layer_params[2:], y_diff, t_gelu_fwd)
+    layernorm_dloss_dp = t_layernorm_bkwd2_p_t(dloss_dx, layer_params[:2], y)
+    dloss_dx = t_layernorm_bkwd2_x_t(dloss_dx, layer_params[:2], y)
+    # account for "y" in residual's "y + y_diff". TODO XXX: Does this reshape make sense?
+    dloss_dx = blck_dloss_dx + dloss_dx
+    dloss_dp = layernorm_dloss_dp + tlayer_ffn_dloss_dp
+    
+    return dloss_dx, dloss_dp
+
 def t_gpt2_tlayer_fwd(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
     if not train:
         p_gen_aux = [None, None, None] 
@@ -1606,6 +2194,17 @@ def t_gpt2_tlayer_fwd3(layer_params, y, mask, train=True, p_gen_aux=None): # inp
     acts = [sblck1_acts]
     sblck2_y = y
     y, sblck2_acts = t_gpt2_tlayer_sublock2_fwd3(layer_params[-6:], y, train, p_gen_aux[2])
+    acts.append((sblck2_y, sblck2_acts))
+    return y, acts
+
+def t_gpt2_tlayer_fwd3_t(layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
+    if not train:
+        p_gen_aux = [0, 0, 0] # Mock values for Triton compilation
+
+    y, sblck1_acts = t_gpt2_tlayer_sublock1_fwd3_t(layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    acts = [sblck1_acts]
+    sblck2_y = y
+    y, sblck2_acts = t_gpt2_tlayer_sublock2_fwd3_t(layer_params[-6:], y, train, p_gen_aux[2])
     acts.append((sblck2_y, sblck2_acts))
     return y, acts
 
@@ -1675,6 +2274,16 @@ def t_gpt2_tlayer_bkwd3(dloss_dx, acts, layer_params, y, mask, train=True, p_gen
     
     return dloss_dx, dloss_dp
 
+def t_gpt2_tlayer_bkwd3_t(dloss_dx, acts, layer_params, y, mask, train=True, p_gen_aux=None): # input: N x D
+    if not train:
+        p_gen_aux = [0, 0, 0] # Mock values for Triton compilation
+    
+    dloss_dx, subblock2_dloss_dp = t_gpt2_tlayer_sublock2_bkwd3_t(dloss_dx, acts[-1][1], layer_params[-6:], acts[-1][0], train, p_gen_aux[2])
+    dloss_dx, subblock1_dloss_dp = t_gpt2_tlayer_sublock1_bkwd3_t(dloss_dx, acts[-2], layer_params[:-6], y, mask, train, p_gen_aux[:2])
+    dloss_dp = subblock1_dloss_dp + subblock2_dloss_dp
+    
+    return dloss_dx, dloss_dp
+
 def t_gpt2_tlayers_fwd(params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
     if not train: # as there are 3 dropouts per tlayer
         p_gen_aux = [None] + [None] * 3 * (len(params) - 3)
@@ -1705,6 +2314,25 @@ def t_gpt2_tlayers_fwd3(params, y, mask, indices, train=True, p_gen_aux=None): #
         acts.append([layer_input, layer_acts])
     acts.append(y)
     y = t_layernorm_fwd(params[-1], y)
+
+    return y, acts
+
+def t_gpt2_tlayers_fwd3_t(params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
+    if not train: # as there are 3 dropouts per tlayer
+        p_gen_aux = [0] + [0] * 3 * (len(params) - 3) # Mock values for Triton compilation
+    
+    y = t_embed_fwd(params[0], y)
+    y = y + params[1][0]
+    acts = [y]
+    y = t_dropout_fwd_t(y, train, p_gen_aux[0])
+    
+    for i, layer_params in enumerate(params[2:-1]):
+        layer_p_gen_aux = p_gen_aux[1+i*3:1+(i+1)*3]
+        layer_input = y
+        y, layer_acts = t_gpt2_tlayer_fwd3_t(layer_params, y, mask, train, layer_p_gen_aux)
+        acts.append([layer_input, layer_acts])
+    acts.append(y)
+    y = t_layernorm_fwd_t(params[-1], y)
 
     return y, acts
 
@@ -1844,6 +2472,40 @@ def t_gpt2_tlayers_bkwd3_p(dloss_dx, acts, params, y, mask, indices, train=True,
     dloss_dp = [embed_dloss_dp, pos_enc_dloss_dp] + layers_dloss_dp + [layernorm_dloss_dp]
     return tuple(dloss_dp)
 
+def t_gpt2_tlayers_bkwd3_p_t(dloss_dx, acts, params, y, mask, indices, train=True, p_gen_aux=None): # input: seq_len x
+    if not train: # as there are 3 dropouts per tlayer
+        p_gen_aux = [0] + [0] * 3 * (len(params) - 3) # Mock values for Triton compilation
+    
+    indices = torch.arange(y.shape[1], device=y.device).unsqueeze(0).expand(*y.shape) # we ignore indices arg
+    t_dropout_input = acts[0]
+    layers_p_gen_aux = [p_gen_aux[1+i*3:1+(i+1)*3] for i in range(len(params) - 3)]
+    layers_inputs = list(zip(acts[1:-1], layers_p_gen_aux))
+    
+    # Propoagate back    
+    # layernorm
+    layernorm_dloss_dp = t_layernorm_bkwd2_p_t(dloss_dx, params[-1], acts[-1])
+    dloss_dx = t_layernorm_bkwd2_x_t(dloss_dx, params[-1], acts[-1]) 
+    
+    # layers
+    layers_dloss_dp = []
+    for i, layer_params in reversed(list(enumerate(params[2:-1]))):
+        layer_acts, layer_p_gen_aux = layers_inputs[i]
+        # TODO XXX: Note in bkwd2, there was a comment to compare bkwd against bkwd2_x, bkwd2_p combined. I think it can be ignored
+        dloss_dx, layer_dloss_dp = t_gpt2_tlayer_bkwd3_t(dloss_dx, layer_acts[1], layer_params, layer_acts[0], mask, train, layer_p_gen_aux)
+        layers_dloss_dp.append(layer_dloss_dp)
+    layers_dloss_dp = list(reversed(layers_dloss_dp)) # TODO XXX: clean up list+ reversed combos
+    
+    # dropout + embed + pos_enc
+    dloss_dx = t_dropout_bkwd2_t(dloss_dx, t_dropout_input, train, p_gen_aux[0])
+    embed_dloss_dp = t_embed_bkwd2(dloss_dx, params[0], y)
+    # Due to tying of embedding and final projection layers,
+    # we need to fill zeroed gradient with respect to biases:
+    embed_dloss_dp = [embed_dloss_dp[0], torch.zeros(embed_dloss_dp[0].shape[:-1], device=y.device)]
+    pos_enc_dloss_dp = t_indexing_bkwd2(dloss_dx, params[1], indices)
+
+    dloss_dp = [embed_dloss_dp, pos_enc_dloss_dp] + layers_dloss_dp + [layernorm_dloss_dp]
+    return tuple(dloss_dp)
+
 def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
     y = t_gpt2_tlayers_fwd(params, y, y_mask, y_indices, train, p_gen_aux)
     
@@ -1852,6 +2514,12 @@ def t_gpt2_forward(params, y, y_mask, y_indices, train, p_gen_aux=None): # input
 
 def t_gpt2_forward_with_acts(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
     y, acts = t_gpt2_tlayers_fwd3(params, y, y_mask, y_indices, train, p_gen_aux)
+    y1 = y
+    y = t_linear_fwd(params[0], y) 
+    return y, [acts, y1]
+
+def t_gpt2_forward_with_acts_t(params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
+    y, acts = t_gpt2_tlayers_fwd3_t(params, y, y_mask, y_indices, train, p_gen_aux)
     y1 = y
     y = t_linear_fwd(params[0], y) 
     return y, [acts, y1]
@@ -1891,6 +2559,18 @@ def t_gpt2_bkwd3_p(dloss_dx, acts, params, y, y_mask, y_indices, train, p_gen_au
     dloss_dx = t_linear_bkwd2_x(dloss_dx, params[0], acts[-1])
     
     dloss_dp = t_gpt2_tlayers_bkwd3_p(dloss_dx, acts[0], params, y, y_mask, y_indices, train, p_gen_aux)    
+    dloss_dp = list(dloss_dp)
+    
+    # As we tie embedding and last projection weights (no need to add jac[0][1] as it's zeroed)
+    dloss_dp[0] = (dloss_dp[0][0] + linear_dloss_dp[0], linear_dloss_dp[1])
+        
+    return tuple(dloss_dp)
+
+def t_gpt2_bkwd3_p_t(dloss_dx, acts, params, y, y_mask, y_indices, train, p_gen_aux=None): # input: seq_len x
+    linear_dloss_dp = t_linear_bkwd2_p(dloss_dx, params[0], acts[-1])    
+    dloss_dx = t_linear_bkwd2_x(dloss_dx, params[0], acts[-1])
+    
+    dloss_dp = t_gpt2_tlayers_bkwd3_p_t(dloss_dx, acts[0], params, y, y_mask, y_indices, train, p_gen_aux)    
     dloss_dp = list(dloss_dp)
     
     # As we tie embedding and last projection weights (no need to add jac[0][1] as it's zeroed)

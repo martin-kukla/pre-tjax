@@ -11,9 +11,11 @@
 from functools import partial
 import math
 import torch
+import triton
+import triton.language as tl
 from torch.func import grad
 from model_torch_func import log_softmax, batched_forward_gpt2
-from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_log_softmax_bkwd2, t_batched_forward_gpt2, t_gpt2_forward, t_gpt2_forward_with_acts, t_gpt2_bkwd_p, t_gpt2_bkwd2_p, t_gpt2_bkwd3_p, _mult_jacs_in_2d
+from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_log_softmax_bkwd2, t_batched_forward_gpt2, t_gpt2_forward, t_gpt2_forward_with_acts, t_gpt2_forward_with_acts_t, t_gpt2_bkwd_p, t_gpt2_bkwd2_p, t_gpt2_bkwd3_p, t_gpt2_bkwd3_p_t, _mult_jacs_in_2d
 
 def avg_cross_entropy_loss(y_labels, x_logits):
     return _avg_cross_entropy_loss(log_softmax, y_labels, x_logits)
@@ -80,7 +82,8 @@ def t_avg_cross_entropy_loss_bkwd2(y_labels, x_logits):
 # We return the results of both passes
 def t_avg_cross_entropy_loss_bkwd3(y_labels, x_logits):
     dloss_dx_shape = x_logits.shape 
-    y_labels = y_labels.reshape((-1,))
+    y_labels = y_labels.reshape((-1,1))
+    y_labels = y_labels.to(torch.int64) # TODO XXX: shouldn't we pass y_labels in int64 already?
     x_logits = x_logits.reshape((y_labels.numel(), -1))
     nonzero_count = torch.count_nonzero(y_labels)
     
@@ -88,18 +91,107 @@ def t_avg_cross_entropy_loss_bkwd3(y_labels, x_logits):
     # and computes values which are reused in propagation below
     x_logits = x_logits - torch.max(x_logits, axis=-1, keepdims=True)[0]
     x_logits_logsumexp = torch.logsumexp(x_logits, axis=-1, keepdims=True)
-    x_logits_indexed = x_logits[(torch.arange(y_labels.numel()), y_labels)]
+    x_logits_indexed = torch.gather(x_logits, 1, y_labels)
     elements_loss = torch.where(y_labels != 0, x_logits_indexed - x_logits_logsumexp, float('nan'))
     loss = -torch.nanmean(elements_loss) 
     
     # propagate back
     jac_nanmean = torch.where(y_labels != 0, -1/nonzero_count, 0)
-    y_labels = y_labels.to(torch.int64) # TODO XXX: shouldn't we pass y_labels in int64 already?
     x_logits_sumexp = torch.exp(x_logits_logsumexp) # Q: is it going to be numerically stable?
     log_softmax_jac = -torch.exp(x_logits)/x_logits_sumexp # note we can precopmute exp(x_logits) as part of logsumpexp before   
     # TODO T: below I still need to create another array, can't src just be "1"?
-    log_softmax_jac.scatter_add_(1, y_labels.unsqueeze(1), torch.ones_like(log_softmax_jac)) # bkwd for indexing
-    dloss_dx = jac_nanmean.unsqueeze(1) * log_softmax_jac
+    log_softmax_jac.scatter_add_(1, y_labels, torch.ones_like(log_softmax_jac)) # bkwd for indexing
+    dloss_dx = jac_nanmean * log_softmax_jac
+    
+    return loss, nonzero_count, dloss_dx.reshape(dloss_dx_shape)
+
+@triton.jit
+def t_avg_cross_entropy_loss_bkwd3_k(y_labels_ptr,
+                    x_logits_ptr,
+                    loss_ptr,
+                    dloss_dx_ptr,
+                    aux_idx_ptr, # Auxilary indexing operation, as alternativ for tl.gather. It uses global memory: overhead + slow
+                    x_logits_row_stride,
+                    dloss_dx_row_stride,
+                    aux_idx_row_stride,
+                    nonzero_count,
+                    n_rows,
+                    n_cols,
+                    BLOCK_SIZE: tl.constexpr,
+                    num_stages: tl.constexpr,
+                    ):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    blcks = tl.cdiv(n_cols, BLOCK_SIZE)
+    
+    for row_idx in tl.range(row_start, n_rows, row_step, num_stages):
+        y_label = tl.load(y_labels_ptr + row_idx) # TODO T: load once, and keep it in shared memory?
+        x_logits_row_start_ptr = x_logits_ptr + row_idx * x_logits_row_stride
+        
+        # Online softmax (https://arxiv.org/pdf/1805.02867)
+        # computes x_logits_max & x_logits_sumexp with one memory load 
+        x_logits_max = -1e9
+        x_logits_sumexp = 0.0
+        d_s = tl.full((BLOCK_SIZE, ), 1, dtype=tl.float32)
+        for blck_idx in tl.range(0, blcks):
+            offsets = blck_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < n_cols
+            x_logits = tl.load(x_logits_row_start_ptr + offsets, mask=mask, other=-1e9)
+            blck_x_logits_max = tl.max(x_logits, axis=0)
+            n_x_logits_max = tl.maximum(x_logits_max, blck_x_logits_max)
+            x_logits_sumexp = x_logits_sumexp * tl.exp(x_logits_max - n_x_logits_max) + tl.sum(tl.exp(x_logits - n_x_logits_max))
+            x_logits_max = n_x_logits_max
+        
+        # If not padding token, contribute to loss/dloss_dx computation
+        if y_label!=0:
+            for blck_idx in tl.range(0, blcks):
+                offsets = blck_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                mask = offsets < n_cols
+                x_logits = tl.load(x_logits_row_start_ptr + offsets, mask=mask, other=-1e9)
+                x_logits = x_logits - x_logits_max
+                x_logits_exp = tl.exp(x_logits)
+                
+                if y_label>= blck_idx*BLOCK_SIZE and y_label<(blck_idx+1)*BLOCK_SIZE:    
+                    # Workaround for the lack of tl.gather for now (slow, as it uses non-local memory)
+                    #loss = tl.gather(x_logits, y_label, 0) - x_logits_logsumexp
+                    aux_idx_row_start_ptr = aux_idx_ptr + row_idx * aux_idx_row_stride
+                    aux_idx_offsets = tl.arange(0, BLOCK_SIZE)
+                    aux_idx = tl.load(aux_idx_row_start_ptr + aux_idx_offsets) # no need for mask here
+                    logit_for_y = tl.sum(x_logits * aux_idx)
+                    loss = logit_for_y - tl.log(x_logits_sumexp)
+                    loss = - loss/nonzero_count
+                    tl.atomic_add(loss_ptr, loss)
+
+                # propagate back:
+                # I used torch.scatter_add_, which I am not sure I can perform locally? thus
+                # using atomic_add twice
+                dloss_dx_row_start_ptr = dloss_dx_ptr + row_idx * dloss_dx_row_stride
+                if y_label>= blck_idx*BLOCK_SIZE and y_label<(blck_idx+1)*BLOCK_SIZE: # TODO T: Can I do it using mask?
+                    tl.atomic_add(dloss_dx_row_start_ptr + y_label, -1/nonzero_count)
+                log_softmax_jac = - x_logits_exp/x_logits_sumexp
+                dloss_dx = -log_softmax_jac/nonzero_count
+                tl.atomic_add(dloss_dx_row_start_ptr + offsets, dloss_dx, mask=mask)
+        
+def t_avg_cross_entropy_loss_bkwd3_t(y_labels, x_logits):
+    dloss_dx_shape = x_logits.shape 
+    y_labels = y_labels.reshape((-1,))
+    y_labels = y_labels.to(torch.int64) # TODO XXX: shouldn't we pass y_labels in int64 already?
+    x_logits = x_logits.reshape((y_labels.numel(), -1))
+    nonzero_count = torch.count_nonzero(y_labels)
+    
+    n_rows, n_cols = x_logits.shape
+    loss = torch.zeros((1), device=x_logits.device) # can we just return value from triton kernel instead? I doubt that
+    dloss_dx = torch.zeros_like(x_logits)
+    # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
+    num_warps=8
+    num_stages=2
+    BLOCK_SIZE = 1024
+    aux_idx = torch.zeros((n_rows, BLOCK_SIZE), device=x_logits.device, dtype=torch.bool)
+    aux_idx.scatter_(1, (y_labels % BLOCK_SIZE).unsqueeze(1), True)
+    num_programs = min(n_rows, 480)
+    
+    t_avg_cross_entropy_loss_bkwd3_k[(num_programs,)](y_labels, x_logits, loss, dloss_dx, aux_idx, x_logits.stride(0), dloss_dx.stride(0), aux_idx.stride(0), nonzero_count.item(), 
+                                                      n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
     
     return loss, nonzero_count, dloss_dx.reshape(dloss_dx_shape)
 
@@ -186,6 +278,18 @@ def t_loss_bkwd3(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs
     
     return dloss_dx, (loss_val, acc, tokens_count/y_out.numel())
 
+def t_loss_bkwd3_t(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N    
+    y_in = y[:, :-1]
+    y_out = y[:, 1:]
+     
+    logits, acts = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, train, p_gen_aux) 
+    
+    loss_val, tokens_count, dloss_dx = t_avg_cross_entropy_loss_bkwd3_t(y_out, logits)
+    dloss_dx = t_gpt2_bkwd3_p_t(dloss_dx, acts, params, y_in, y_mask, y_indices, train, p_gen_aux)
+    acc = accuracy(y_out, logits)
+    
+    return dloss_dx, (loss_val, acc, tokens_count/y_out.numel())
+
 # print(f'iter #{i} loss {loss_train(params, jnp.array(x[:1]), jnp.array(y[:1]), random.PRNGKey(0))[0] }')
 
 # with jax.disable_jit():
@@ -227,23 +331,20 @@ def sample_p_gen_aux(params):
     return [it.item() for it in p_gen_aux]
 
 def t_acc_grad_loss(acc_grads, params, y, y_mask, y_indices):
-    p_gen_aux = sample_p_gen_aux(params)
-    grad_loss_fn = partial(t_loss_bkwd, train=True, p_gen_aux=p_gen_aux)
-    return _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices)
+    return _acc_grad_loss(t_loss_bkwd, acc_grads, params, y, y_mask, y_indices)
 
 def t_acc_grad_loss2(acc_grads, params, y, y_mask, y_indices):
-    p_gen_aux = sample_p_gen_aux(params)
-    grad_loss_fn = partial(t_loss_bkwd2, train=True, p_gen_aux=p_gen_aux)
-    return _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices)
+    return _acc_grad_loss(t_loss_bkwd2, acc_grads, params, y, y_mask, y_indices)
 
 def t_acc_grad_loss3(acc_grads, params, y, y_mask, y_indices):
-    p_gen_aux = sample_p_gen_aux(params)
-    grad_loss_fn = partial(t_loss_bkwd3, train=True, p_gen_aux=p_gen_aux)
-    return _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices)
+    return _acc_grad_loss(t_loss_bkwd3, acc_grads, params, y, y_mask, y_indices)
+
+def t_acc_grad_loss3_t(acc_grads, params, y, y_mask, y_indices):
+    return _acc_grad_loss(t_loss_bkwd3_t, acc_grads, params, y, y_mask, y_indices)
 
 
 def _acc_grad_loss(grad_loss_fn, acc_grads, params, y, y_mask, y_indices):
-    i_step_grads, grad_loss_rest = grad_loss_fn(params, y, y_mask, y_indices)
+    i_step_grads, grad_loss_rest = grad_loss_fn(params, y, y_mask, y_indices, train=True, p_gen_aux=sample_p_gen_aux(params))
     
     for grp_i in range(len(acc_grads)):
         for p_i in range(len(acc_grads[grp_i])):
