@@ -656,7 +656,12 @@ def t_scaled_dot_prod_attn_fwd3_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, a
             ms = tl.full((BLOCK_SIZE_Q_N, 1), -1e9, tl.float32)
             ls = tl.zeros_like(ms)
             output = tl.zeros((BLOCK_SIZE_Q_N, BLOCK_SIZE_D), dtype=tl.float32)
-            for k_t_n_step in range(0, tl.cdiv(N, BLOCK_SIZE_K_T_N)):
+            
+            # ASSUMES CAUSAL MASK FOR NOW 
+            # This is somehow limited suppport for now. I only tested this for BLOCK_SIZE_Q_N = 2x BLOCK_SIZE_K_T_N
+            k_t_n_step_end = min(tl.cdiv(N, BLOCK_SIZE_K_T_N), (q_n_step+1) *tl.cdiv(BLOCK_SIZE_Q_N, BLOCK_SIZE_K_T_N))
+            
+            for k_t_n_step in range(0, k_t_n_step_end):
                 k_t_n_offsets = k_t_n_step * BLOCK_SIZE_K_T_N + tl.arange(0, BLOCK_SIZE_K_T_N) 
                 k_t_n_offsets_mod = k_t_n_offsets % N
                 
@@ -721,6 +726,10 @@ def t_scaled_dot_prod_attn_fwd3_t(qkv:torch.Tensor, mask:torch.Tensor, train=Tru
     BLOCK_SIZE_Q_N = 128
     BLOCK_SIZE_K_T_N = 64
     BLOCK_SIZE_D = triton.next_power_of_2(D)
+    
+    # We enforce causal masking for now, but the assert below cost too much perf
+    #assert torch.allclose(mask, torch.tril(torch.ones((N, N), device=mask.device, dtype=torch.bool))), "Assumes causal mask"
+    assert BLOCK_SIZE_Q_N >= BLOCK_SIZE_K_T_N, "Due to the limited support for levarging causal mask"
 
     if not train:
         p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
