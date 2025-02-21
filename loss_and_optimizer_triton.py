@@ -15,7 +15,7 @@ import triton
 import triton.language as tl
 from torch.func import grad
 from model_torch_func import log_softmax, batched_forward_gpt2
-from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_log_softmax_bkwd2, t_batched_forward_gpt2, t_gpt2_forward, t_gpt2_forward_with_acts, t_gpt2_forward_with_acts_t, t_gpt2_bkwd_p, t_gpt2_bkwd2_p, t_gpt2_bkwd3_p, t_gpt2_bkwd3_p_t, _mult_jacs_in_2d
+from model_triton import t_log_softmax_fwd, t_log_softmax_bkwd, t_log_softmax_bkwd2, t_gpt2_forward, t_gpt2_forward_with_acts, t_gpt2_forward_with_acts_t, t_gpt2_bkwd_p, t_gpt2_bkwd2_p, t_gpt2_bkwd3_p, t_gpt2_bkwd3_p_t, _mult_jacs_in_2d
 
 def avg_cross_entropy_loss(y_labels, x_logits):
     return _avg_cross_entropy_loss(log_softmax, y_labels, x_logits)
@@ -218,7 +218,7 @@ def loss(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
     return _loss(batched_forward_gpt2, avg_cross_entropy_loss, params, y, y_mask, y_indices, train)
 
 def t_loss(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
-    fwd_fn = partial(t_batched_forward_gpt2, p_gen_aux=p_gen_aux)
+    fwd_fn = partial(t_gpt2_forward, p_gen_aux=p_gen_aux)
     return _loss(fwd_fn, t_avg_cross_entropy_loss, params, y, y_mask, y_indices, train)
     
 def _loss(fwd_fn, celoss_fn, params, y, y_mask, y_indices, train):  # inputs: BS x N

@@ -2577,5 +2577,3 @@ def t_gpt2_bkwd3_p_t(dloss_dx, acts, params, y, y_mask, y_indices, train, p_gen_
     dloss_dp[0] = (dloss_dp[0][0] + linear_dloss_dp[0], linear_dloss_dp[1])
         
     return tuple(dloss_dp)
-
-t_batched_forward_gpt2 = t_gpt2_forward # TODO XXX: replace the references to the left with the right
