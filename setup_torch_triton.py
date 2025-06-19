@@ -1,4 +1,5 @@
 #! /bin/bash
+# Assumes you are using (Pytorch) image with cuda12.4
 pip install jupyter
 pip install datasets
 pip install torch
