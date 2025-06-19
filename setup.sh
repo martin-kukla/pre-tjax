@@ -28,3 +28,6 @@ wandb login
 # pip install torch==2.6.0
 # pip install triton==3.2.0
 # pip install optree==0.14.0
+
+# Pin down numpy to the verion priox to 2.x
+# pip install numpy==1.26.4
