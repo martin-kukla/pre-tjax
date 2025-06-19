@@ -25,16 +25,9 @@ wandb login
 
 
 # Corect packages of torch/triton for running torchfunc_jit/triton version
-# pip install torch==2.6.0
-# pip install triton==3.2.0
-# pip install optree==0.14.0
+pip install torch==2.6.0
+pip install triton==3.2.0
+pip install optree==0.14.0
 
 # Pin down numpy to the verion priox to 2.x
-# pip install numpy==1.26.4
-
-
-# Adhoc: Only extra commands needed for jax runs if using jax24.04-py3 (https://docs.nvidia.com/deeplearning/frameworks/jax-release-notes/rel-24-04.html):
-# pip install datasets
-# pip install wandb
-# wandb login
-# pip install evaluate
+pip install numpy==1.26.4
