@@ -78,7 +78,7 @@ from loss_and_optimizer_jax import loss_train, loss_eval, log_probs, grad_loss, 
 # Figure out non bias/gain params, as we only want to apply weight decay to those in AdamW
 # Only 1D weights, which are initialized to 0s are bias/gain params (including bias of LayerNorm)
 weight_decay_mask = tuple([ tuple([not (item.ndim==1 and all(item==0)) for item in grp]) for grp in params])
-print(weight_decay_mask)
+#print(weight_decay_mask)
 
 
 ###############################################
