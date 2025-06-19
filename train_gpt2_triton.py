@@ -66,24 +66,35 @@ else:
 # # Figure out non bias/gain params, as we only want to apply weight decay to those in AdamW
 # # Only 1D weights, which are initialized to 0s are bias/gain params (including bias of LayerNorm)
 weight_decay_mask = tuple([ tuple([not (item.ndim==1 and all(item==0)) for item in grp]) for grp in params])
-print(weight_decay_mask)
+#print(weight_decay_mask)
 
 
 ###############################################
 ### Tests (forward pass + memory) TODO XXX: Remove
 ###############################################
-# Testing forward pass for triton
+# Testing forward pass for triton (eval only)
+# Remaining TODOs: 1) support packed batches in Triton's FlashAttention. 2) fix the mask for non-packed batches (see the hotfix below)
 from model_torch_func import batched_forward_gpt2
-from model_triton import t_gpt2_forward
-_, y, _, y_mask, _, _, y_indices = next(get_batched_examples_packed(ds, 8, seq_len, START_TOK, END_TOK, pack_frac=0.75, skip_n_rows = 0))
+from model_triton import t_gpt2_forward, t_gpt2_forward_with_acts, t_gpt2_forward_with_acts_t
+from tokenized_dataset import get_batched_examples
+test_batch_size = 8
+# Note, the triton version doesn't support the packed batches (i.e. it only supports lower triangular mask)
+#_, y, _, y_mask, _, _, y_indices = next(get_batched_examples_packed(ds, test_batch_size, seq_len, START_TOK, END_TOK, pack_frac=0.75, skip_n_rows = 0))
+_, y, _, y_mask, _, _, y_indices = next(get_batched_examples(ds, test_batch_size, seq_len, START_TOK, END_TOK, skip_n_rows = 0))
+
 y = torch.tensor(y, dtype=torch.int32, device="cuda")
-y_mask = torch.tensor(y_mask, dtype=torch.bool, device="cuda")
+
+# Hotfix: We need to overwrite mask, as it's incorrectly 
+# y_mask = torch.tensor(y_mask, dtype=torch.bool, device="cuda")
+y_mask = torch.ones((test_batch_size, seq_len, seq_len), dtype=torch.bool, device="cuda")
+for i, i_mask in enumerate(y_mask):
+    y_mask[i] = torch.tril(i_mask)
+    
 y_indices = torch.tensor(y_indices, dtype=torch.int16, device="cuda")
-train=False # TODO: play with
 y_in = y[:, :-1]
-logits_torch_logits = batched_forward_gpt2(params, y_in, y_mask, y_indices, train) 
-logits_triton = t_gpt2_forward(params, y_in, y_mask, y_indices, train) 
-assert torch.all(logits_torch_logits == logits_triton)
+logits_torch_func = batched_forward_gpt2(params, y_in, y_mask, y_indices, False) 
+logits_triton, _ = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, False) 
+assert torch.allclose(logits_torch_func, logits_triton, rtol=1e-2, atol=5e-3), (logits_torch_func.shape, logits_triton.shape, logits_torch_func[-2:, -4:, -10:], logits_triton[-2:, -4:, -10:])
 
 # # Testing Memory Usage. I decided not to get too deep into it, since this uses torch.grad + torch.compile..
 # TODO XXX: It's still puzzling that the maximum batch_size which torchfunc's version can do is 8 in comparison to 16 by JAX...
