@@ -136,7 +136,7 @@ if True:
     import wandb
     wandb.init(
         # set the wandb project where this run will be logged
-        project="t",
+        project="t_final",
     
         # track hyperparameters and run metadata
         #config={

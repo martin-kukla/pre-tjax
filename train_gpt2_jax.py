@@ -28,8 +28,8 @@ jax.devices()
 ###############################################
 import datasets
 from tokenized_dataset import load_tokenized_dataset_gpt2, load_tokenized_dataset_hellaswag, unpack_hellaswag_x, unpack_hellaswag_batched_x, concatenate_hellaswag_y_and_choice, get_batched_examples, get_batched_examples_packed 
-ds, (tokenize, detokenize, tokenizer_vocab_size) = load_tokenized_dataset_gpt2("train[:10%]") #:1% or :1000
-ds = ds.train_test_split(test_size=0.01, seed=42) # TODO: put seed in better place? does it mess up with resume_from_checkpoint logic?
+ds, (tokenize, detokenize, tokenizer_vocab_size) = load_tokenized_dataset_gpt2("train[:5%]") #:1% or :1000
+ds = ds.train_test_split(test_size=0.02, seed=42) # TODO: put seed in better place? does it mess up with resume_from_checkpoint logic?
 ds = datasets.DatasetDict({
     'train': ds['train'],
     'validation': ds['test'] #rename
@@ -95,7 +95,7 @@ import wandb
 if True:
     wandb.init(
         # set the wandb project where this run will be logged
-        project="t",
+        project="t_final",
     
         # track hyperparameters and run metadata
         #config={
@@ -147,9 +147,9 @@ resume_from_checkpoint = None
 
 # ML training params
 key_training = random.PRNGKey(0) 
-batch_size= 16 
-gradient_accumulations_steps = 16 # TODO XXX: This means effective batch_size=256 instead of 512 used in the paper
-num_steps_multidevice = 50000 #30000 #10000 #100000 # TODO XXX: think what it should be for GPT2
+batch_size= 8 #16 
+gradient_accumulations_steps = 32 #16 # TODO XXX: This means effective batch_size=256 instead of 512 used in the paper
+num_steps_multidevice = 10000 #50000 #30000 #10000 #100000 # TODO XXX: think what it should be for GPT2
 max_lr = 0.00025
 warmup_steps_multidevice= 2000
 betas = (0.9, 0.98) 
