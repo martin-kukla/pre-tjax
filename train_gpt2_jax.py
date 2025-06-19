@@ -104,7 +104,7 @@ if True:
         #"dataset": "CIFAR-100",
         #"epochs": 10,
         #}
-        sync_tensorboard=True
+        #sync_tensorboard=True
     )
 
 
@@ -113,19 +113,32 @@ if True:
 ###############################################
 import datetime
 from tqdm import tqdm
-from torch.utils.tensorboard import SummaryWriter
+#from torch.utils.tensorboard import SummaryWriter
 import itertools
 import pickle
 import evaluate
 import numpy as np # should we get rid of it?
 import math
 
+# Mocking torch.utils.tensorboard.SummaryWriter class, so we can
+# log directly to wandb, but without the need to install torch (often has concflicts with jax..)
+class MockSummaryWriter():
+    def __init__(self, wandb):
+        self.wandb = wandb
+        
+    def add_scalar(self, k, v, s):
+        wandb.log({k:v}, s)
+        
+    def close(self):
+        self.wandb.finish()
+    
 # Infra training params
 run_name = datetime.datetime.now().strftime("%h%d_%H-%M-%S")
 log_every_steps_multidevice = 10
 eval_every_steps_multidevice = 500
 eval_n_examples = 4
-writer = SummaryWriter(f'/lego/storage/output/runs/{run_name}')
+#writer = SummaryWriter(f'/lego/storage/output/runs/{run_name}')
+writer = MockSummaryWriter(wandb)
 #checkpoint_every_steps = None #500 * 8 machines
 checkpoint_every_steps = 4000 #20000 # TODO: move to use _multidevice too
 resume_from_checkpoint = None
