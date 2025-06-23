@@ -204,7 +204,7 @@ while True:
             
             #params, moments = adam_w(params, grads, lr, betas, epsilon, moments, i)
             params, moments = adam_w_in_place(params, grads, lr, betas, epsilon, moments, i, weight_decay=0.01, weight_decay_mask=weight_decay_mask)
-    
+
         # Logging:
         if i_multidevice%log_every_steps_multidevice==0 and is_i_device_zero:
             loss_val = loss_val.item()
@@ -222,6 +222,7 @@ while True:
             writer.add_scalar('train/grad_norm', grad_norm, i_multidevice)
             for grp_i, grp_grad_norm in enumerate(grps_grad_norms):
                 writer.add_scalar(f'train_details/grad_norm_grp_{grp_i}', grp_grad_norm, i_multidevice)
+            writer.add_scalar('global_step', i_multidevice, i_multidevice) #for consistency with TensorBoard used by torch
 
             # TODO: some metrics computed on x, other on y. Make it consistent
             #pad_tokens_prop = sum([y_row.count(0) for y_row in y]) / sum([len(y_row) for y_row in y])
@@ -250,6 +251,8 @@ while True:
                 val_toks_props.append(toks_prop)
             writer.add_scalar('eval/loss', jnp.average(jnp.hstack(val_losses), weights = jnp.hstack(val_toks_props)).item(), i_multidevice)
             writer.add_scalar('eval/acc', jnp.average(jnp.hstack(val_accs), weights = jnp.hstack(val_toks_props)).item(), i_multidevice)
+            if eval_every_steps_multidevice % log_every_steps_multidevice!=0:
+                writer.add_scalar('global_step', i_multidevice, i_multidevice) #for consistency with TensorBoard used by torch
             
             # Few predictions TODO XXX: vary temperature -> diff samples
             y_sample = predict(params, jnp.array(y_eval_mask), jnp.array(y_eval_indices), seq_len, START_TOK, END_TOK)
