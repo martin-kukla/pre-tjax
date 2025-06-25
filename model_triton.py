@@ -729,7 +729,10 @@ def t_scaled_dot_prod_attn_fwd3_t(qkv:torch.Tensor, mask:torch.Tensor, train=Tru
     
     # We enforce causal masking for now, but the assert below cost too much perf
     #assert torch.allclose(mask, torch.tril(torch.ones((N, N), device=mask.device, dtype=torch.bool))), "Assumes causal mask"
-    assert BLOCK_SIZE_Q_N >= BLOCK_SIZE_K_T_N, "Due to the limited support for levarging causal mask"
+    assert BLOCK_SIZE_Q_N >= BLOCK_SIZE_K_T_N, "The Q block size needs to be bigger/equal than the K block size. Due to the limited support for levarging causal mask"
+    
+    assert N % BLOCK_SIZE_Q_N==0, "Given the limited support, N has be dividable by the Q block size"
+    assert N % BLOCK_SIZE_K_T_N==0, "Given the limited support, N has be dividable by the K block size" 
 
     if not train:
         p_gen_aux = 0 # Need to mock some value for triton to compile the kernel without errors
