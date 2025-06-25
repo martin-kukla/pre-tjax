@@ -6,7 +6,7 @@ import torch
 torch.set_printoptions(precision=6)
 from torch.func import jacrev
 from model_torch_func import init_transformer_gpt2
-BS, H, N, D = 1, 2, 512, 64 # 1, 1, 3, 4 #2, 2, 5, 4
+BS, H, N, D = 2, 2, 512, 64 # 1, 1, 3, 4 #2, 2, 5, 4
 vocab_size = 128
 layers = 2
 p_gen_aux = [42] + [43,44,45] * layers
@@ -21,7 +21,7 @@ for i, i_mask in enumerate(mask):
 
 # itroduce aritifical paddign to break current code
 k=10
-mask[0, 1:, :]=0
+mask[1, k+1:, :]=0
 print(mask)
 
 lens = [N]*BS
