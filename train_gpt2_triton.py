@@ -83,18 +83,18 @@ test_batch_size = 8
 _, y, _, y_mask, _, _, y_indices = next(get_batched_examples(ds, test_batch_size, seq_len, START_TOK, END_TOK, skip_n_rows = 0))
 
 y = torch.tensor(y, dtype=torch.int32, device="cuda")
-
-# Hotfix: We need to overwrite mask, as it's incorrectly 
-# y_mask = torch.tensor(y_mask, dtype=torch.bool, device="cuda")
-y_mask = torch.ones((test_batch_size, seq_len, seq_len), dtype=torch.bool, device="cuda")
-for i, i_mask in enumerate(y_mask):
-    y_mask[i] = torch.tril(i_mask)
-    
+y_mask = torch.tensor(y_mask, dtype=torch.bool, device="cuda")
 y_indices = torch.tensor(y_indices, dtype=torch.int16, device="cuda")
 y_in = y[:, :-1]
+y_out = y[:, 1:]
 logits_torch_func = batched_forward_gpt2(params, y_in, y_mask, y_indices, False) 
 logits_triton, _ = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, False) 
+# compare only on non-padded positions:
+logits_torch_func=torch.where(y_out.unsqueeze(2)!=0, logits_torch_func, 0)
+logits_triton=torch.where(y_out.unsqueeze(2)!=0, logits_triton, 0)  
+
 assert torch.allclose(logits_torch_func, logits_triton, rtol=1e-2, atol=5e-3), (logits_torch_func.shape, logits_triton.shape, logits_torch_func[-2:, -4:, -10:], logits_triton[-2:, -4:, -10:])
+print ("Forward test succesful")
 
 # # Testing Memory Usage. I decided not to get too deep into it, since this uses torch.grad + torch.compile..
 # TODO XXX: It's still puzzling that the maximum batch_size which torchfunc's version can do is 8 in comparison to 16 by JAX...
