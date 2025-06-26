@@ -13,55 +13,34 @@ p_gen_aux = [42] + [43,44,45] * layers
 layers_params = init_transformer_gpt2(vocab_size, D, layers, H, 4*D, N)
 y= torch.randint(vocab_size, (BS, N+1), device="cuda").to(torch.int32)
 mask = torch.ones((BS, N, N), dtype=torch.bool, device="cuda")
-train = False
-
 for i, i_mask in enumerate(mask):
     mask[i] = torch.tril(i_mask)
-    #mask[i] = torch.zeros_like(i_mask)
-
-# itroduce aritifical paddign to break current code
-k=10
-mask[1, k+1:, :]=0
-print(mask)
+train = False
 
 lens = [N]*BS
 import numpy as np
 y_indices = torch.tensor(np.vstack([np.arange(el_len) for el_len in lens]), device="cuda")
-print(f'y_indices', y_indices.shape)
 
 from model_torch_func import batched_forward_gpt2
 from model_triton import t_gpt2_forward_with_acts_t
 y_in = y[:, :-1]
 y_out = y[:, 1:]
 y_indices = y_indices[:, 1:]
+
+# introduce aritifical padding to break current code
+k=10
+mask[1, k+1:, :]=0
+print(mask)
     
 res2 = batched_forward_gpt2(layers_params, y_in, mask, y_indices, train)
 print(res2.shape, res2)
-#print(res2[1])
-#print_res_shapes(res2[0]) 
 
 print(f'----X----')
 
 res3, acts3 = t_gpt2_forward_with_acts_t(layers_params, y_in, mask, y_indices, train, p_gen_aux)
 print(res3.shape, res3)
-#print_res_shapes(res3[0]) 
 
-#assert torch.allclose(res2[0], res3[0], rtol=1e-2, atol=5e-3)
+# TODO: this should be failing, as we compare on all logits from all positions right now (instead of non-padded ones)
+# Due to assumption about causal masking in my FlashAttn impl, the result should be incorrect:
+# For rows of the mask which are zeros (empty), we should be taking the average over all Vs, but we only take the ones in the lower triangular
 assert torch.allclose(res2, res3, rtol=1e-2, atol=5e-3) 
-#assert torch.allclose(res2, res3, rtol=1e-3, atol=2e-4)
-
-# print(f'----XXX----')
-
-# def recursive_assert(a, b):
-#     if isinstance(a, torch.Tensor):
-#         assert isinstance(b, torch.Tensor)
-#         torch.allclose(a, b, rtol=1e-3, atol=1e-4)
-#     else:
-#         assert not isinstance(b, torch.Tensor)
-#         if len(a) != len(b):
-#             return
-#         assert len(a) == len(b), f'len(a) {len(a)}, len(b) {len(b)}'
-#         for i, (ai, bi) in enumerate(zip(a, b)):
-#             recursive_assert(ai, bi)
-# recursive_assert(acts2, acts3)
-# print(f'----XXX----')
