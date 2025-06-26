@@ -618,7 +618,7 @@ def t_scaled_dot_prod_attn_fwd(qkv, mask, train=True, p_gen_aux=None): # inputs:
 @triton.jit
 def t_scaled_dot_prod_attn_fwd3_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, acts0_ptr, acts1_ptr,
                 q_stride0, q_stride1, q_stride2, k_t_stride0, k_t_stride1, k_t_stride2,
-                v_stride0, v_stride1, v_stride2, mask_stride0, mask_stride1,
+                v_stride0, v_stride1, v_stride2, mask_stride0, mask_stride1, mask_stride2,
                 output_stride0, output_stride1, output_stride2, acts0_stride0, acts1_stride0,
                 train, p_gen_aux,
                 BS_H, N:tl.constexpr, D,
@@ -635,7 +635,8 @@ def t_scaled_dot_prod_attn_fwd3_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, a
     for bs_h_pid in tl.range(bs_h_start, BS_H, bs_h_step, num_stages):
         bs_h_q_ptr = q_ptr + bs_h_pid * q_stride0
         bs_h_k_t_ptr = k_t_ptr + bs_h_pid * k_t_stride0    
-        bs_h_v_ptr = v_ptr + bs_h_pid * v_stride0        
+        bs_h_v_ptr = v_ptr + bs_h_pid * v_stride0
+        bs_h_mask_ptr = mask_ptr + bs_h_pid * mask_stride0
         bs_h_output_ptr = output_ptr + bs_h_pid * output_stride0
         bs_h_acts0_ptr = acts0_ptr + bs_h_pid * acts0_stride0
         bs_h_acts1_ptr = acts1_ptr + bs_h_pid * acts1_stride0     
@@ -676,7 +677,7 @@ def t_scaled_dot_prod_attn_fwd3_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, a
 
                 # /sqrt(D) + Mask + Softmax + Dropout (with keeping updating ms&ls following FlashAttention's paper)
                 acc = acc / sqrt_D
-                mask_blck_ptr = mask_ptr + q_n_offsets_mod[:,None] * mask_stride0 + k_t_n_offsets_mod[None, :] * mask_stride1
+                mask_blck_ptr = bs_h_mask_ptr + q_n_offsets_mod[:,None] * mask_stride1 + k_t_n_offsets_mod[None, :] * mask_stride2
                 mask_mask = (q_n_offsets[:,None] <N) & (k_t_n_offsets[None, :]<N)
                 mask_blck = tl.load(mask_blck_ptr, mask=mask_mask, other= 0.0)
                 acc = tl.where(mask_blck, acc, -1e9)
@@ -711,7 +712,8 @@ def t_scaled_dot_prod_attn_fwd3_t(qkv:torch.Tensor, mask:torch.Tensor, train=Tru
     q = q.reshape(BS*H, N, D)
     k = k.reshape(BS*H, N, D)
     v = v.reshape(BS*H, N, D)
-    mask = mask[0] # Asumme mask being the same across rows. TODO XXX: make that assumption throughput the code
+    # As we split computation over BS*H dimension, we need to transform mask to this shape below
+    mask=mask.unsqueeze(1).expand(-1, H, -1, -1).reshape(BS*H, N, N) # is it slow? Can we do it faster?
     
     output = torch.zeros_like(q)
     acts0 = torch.empty((BS*H, N), device=q.device)
@@ -741,7 +743,8 @@ def t_scaled_dot_prod_attn_fwd3_t(qkv:torch.Tensor, mask:torch.Tensor, train=Tru
         q, k_t, v, mask, output, acts0, acts1,
         q.stride(0), q.stride(1), q.stride(2), k_t.stride(0), k_t.stride(1), k_t.stride(2), 
         v.stride(0), v.stride(1), v.stride(2),
-        mask.stride(0), mask.stride(1), output.stride(0), output.stride(1), output.stride(2),
+        mask.stride(0), mask.stride(1), mask.stride(2),
+        output.stride(0), output.stride(1), output.stride(2),
         acts0.stride(0), acts1.stride(0),
         train, p_gen_aux,
         BS*H, N, D,
