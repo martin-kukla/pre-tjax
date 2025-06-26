@@ -729,8 +729,10 @@ def t_scaled_dot_prod_attn_fwd3_t(qkv:torch.Tensor, mask:torch.Tensor, train=Tru
     BLOCK_SIZE_K_T_N = 64
     BLOCK_SIZE_D = triton.next_power_of_2(D)
     
-    # We enforce causal masking for now, but the assert below cost too much perf
-    #assert torch.allclose(mask, torch.tril(torch.ones((N, N), device=mask.device, dtype=torch.bool))), "Assumes causal mask"
+    # We require the causal masking for now, but the assert below cost too much perf
+    #assert torch.allclose(mask, torch.tril(mask)), "Assumes causal mask"
+    # NB: Importantly, as a consequence of the above, the computation will be incorrect for masks which have zeroed rows:
+    # In this case, instead of taking an average over all Vs, we will only take the average over Vs which match lower-triangular of the matrix!
     assert BLOCK_SIZE_Q_N >= BLOCK_SIZE_K_T_N, "The Q block size needs to be bigger/equal than the K block size. Due to the limited support for levarging causal mask"
     
     assert N % BLOCK_SIZE_Q_N==0, "Given the limited support, N has be dividable by the Q block size"
