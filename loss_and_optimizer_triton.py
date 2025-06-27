@@ -234,6 +234,7 @@ def _loss(fwd_fn, celoss_fn, params, y, y_mask, y_indices, train):  # inputs: BS
 loss_train = partial(loss, train=True)
 loss_eval = torch.compile(partial(loss, train=False))
 
+uncompiled_grad_loss = grad(loss_train, has_aux=True) # used for debugging purposes
 grad_loss = torch.compile(grad(loss_train, has_aux=True))
 
 def t_loss_bkwd(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N    
