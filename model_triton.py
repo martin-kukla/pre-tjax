@@ -713,7 +713,9 @@ def t_scaled_dot_prod_attn_fwd3_t(qkv:torch.Tensor, mask:torch.Tensor, train=Tru
     k = k.reshape(BS*H, N, D)
     v = v.reshape(BS*H, N, D)
     # As we split computation over BS*H dimension, we need to transform mask to this shape below
-    mask=mask.unsqueeze(1).expand(-1, H, -1, -1).reshape(BS*H, N, N) # is it slow? Can we do it faster?
+    # I don't think the below adds to memory pressure, but we could always keep it in its original
+    # form i.e. BSxNxN, and have different pointer arithmetic in the kernel
+    mask=mask.unsqueeze(1).expand(-1, H, -1, -1).reshape(BS*H, N, N)
     
     output = torch.zeros_like(q)
     acts0 = torch.empty((BS*H, N), device=q.device)
@@ -836,7 +838,7 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
                 dloss_dx_stride0, dloss_dx_stride1, dloss_dx_stride2,
                 q_stride0, q_stride1, q_stride2, k_t_stride0, k_t_stride1, k_t_stride2,
                 v_stride0, v_stride1, v_stride2, output_stride0, output_stride1, output_stride2, 
-                mask_stride0, mask_stride1, acts0_stride0, acts1_stride0,
+                mask_stride0, mask_stride1, mask_stride2, acts0_stride0, acts1_stride0,
                 dloss_dq_stride0, dloss_dq_stride1, dloss_dq_stride2,                                                                      
                 dloss_dk_stride0, dloss_dk_stride1, dloss_dk_stride2,                                   
                 dloss_dv_stride0, dloss_dv_stride1, dloss_dv_stride2,
@@ -855,7 +857,8 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
         bs_h_dloss_dx_ptr = dloss_dx_ptr + bs_h_pid * dloss_dx_stride0      
         bs_h_q_ptr = q_ptr + bs_h_pid * q_stride0
         bs_h_k_t_ptr = k_t_ptr + bs_h_pid * k_t_stride0    
-        bs_h_v_ptr = v_ptr + bs_h_pid * v_stride0        
+        bs_h_v_ptr = v_ptr + bs_h_pid * v_stride0       
+        bs_h_mask_ptr = mask_ptr + bs_h_pid * mask_stride0 
         bs_h_output_ptr = output_ptr + bs_h_pid * output_stride0        
         bs_h_acts0_ptr = acts0_ptr + bs_h_pid * acts0_stride0           
         bs_h_acts1_ptr = acts1_ptr + bs_h_pid * acts1_stride0                   
@@ -917,7 +920,7 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
 
                 # Compute "Q * K^T / sqrt(D) + Mask + Softmax + Dropout", and backpropagate
                 attn = tl.dot(q_blck, k_blck) / sqrt_D
-                mask_blck_ptr = mask_ptr + q_n_offsets_mod[:,None] * mask_stride0 + k_t_n_offsets_mod[None, :] * mask_stride1
+                mask_blck_ptr = bs_h_mask_ptr + q_n_offsets_mod[:,None] * mask_stride1 + k_t_n_offsets_mod[None, :] * mask_stride2
                 mask_mask = (q_n_offsets[:,None] <N) & (k_t_n_offsets[None, :]<N)
                 mask_blck = tl.load(mask_blck_ptr, mask=mask_mask, other= 0.0)
                 attn = tl.where(mask_blck, attn, -1e9)
@@ -959,7 +962,10 @@ def t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torch.
     q = q.reshape(BS*H, N, D)
     k = k.reshape(BS*H, N, D)
     v = v.reshape(BS*H, N, D)
-    mask = mask[0] # Asumme mask being the same across rows. TODO XXX: make that assumption throughput the code
+    # As we split computation over BS*H dimension, we need to transform mask to this shape below
+    # I don't think the below adds to memory pressure, but we could always keep it in its original
+    # form i.e. BSxNxN, and have different pointer arithmetic in the kernel
+    mask=mask.unsqueeze(1).expand(-1, H, -1, -1).reshape(BS*H, N, N)
     acts0, acts1, output = acts
     acts0 = acts0.reshape(BS*H, N)
     acts1 = acts1.reshape(BS*H, N)    
@@ -994,7 +1000,8 @@ def t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torch.
         q.stride(0), q.stride(1), q.stride(2), k_t.stride(0), k_t.stride(1), k_t.stride(2), 
         v.stride(0), v.stride(1), v.stride(2),
         output.stride(0), output.stride(1), output.stride(2),        
-        mask.stride(0), mask.stride(1), acts0.stride(0), acts1.stride(0),
+        mask.stride(0), mask.stride(1), mask.stride(2),
+        acts0.stride(0), acts1.stride(0),
         dloss_dq.stride(0), dloss_dq.stride(1), dloss_dq.stride(2),        
         dloss_dk.stride(0), dloss_dk.stride(1), dloss_dk.stride(2),
         dloss_dv.stride(0), dloss_dv.stride(1), dloss_dv.stride(2),
