@@ -11,6 +11,8 @@
 # (all backward passes are writen from first principle with exception of bkwd for BMM in _bkwd_x, _bkwd_p and _bkwd2)
 
 ### PARAMS + MODEL
+DROPOUT_RATE = 0.1 # TODO: move it out, and pass as paramteter
+
 import math
 import torch
 import triton
@@ -18,7 +20,7 @@ import triton.language as tl
 
 ### PARAMS: they are the same as for Torch.Func, so import
 
-from model_torch_func import init_transformer_gpt2, count_num_params, DROPOUT_RATE
+from model_torch_func import init_transformer_gpt2, count_num_params
 
 ### MODEL in TRITON
 
@@ -227,7 +229,7 @@ def t_gelu_fwd(x):
 def tanh_k(x):
     return 2 * tl.sigmoid(2 * x) - 1
 
-gelu_k_const = triton.language.constexpr(math.sqrt(2/math.pi))
+gelu_k_const:tl.constexpr = math.sqrt(2/math.pi)
 @triton.jit
 def gelu_k(x):
     return 0.5 * x * (1 + tanh_k(gelu_k_const * (x + 0.044715 * x * x * x)))
@@ -1465,7 +1467,8 @@ def t_dropout_fwd(x, train=True, p_gen_aux=None):
     
     return x * mask
 
-T_DROPOUT_RATE = triton.language.constexpr(DROPOUT_RATE)
+# TODO T: Think how to unify it with DROPOUT_RATE global variable above
+T_DROPOUT_RATE: triton.language.constexpr = 0.1
     
 @triton.jit
 def dropout_k(x, train, p_gen_aux, offsets):
