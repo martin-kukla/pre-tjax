@@ -16,7 +16,7 @@ res1 = dropout(aa, train=train)
 import triton
 import triton.language as tl
 
-from model_triton import T_DROPOUT_RATE, t_dropout_fwd_t
+from model_triton import t_dropout_fwd_t
 
 res2=t_dropout_fwd_t(aa, train=train, p_gen_aux=42)
 # res2

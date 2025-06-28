@@ -11,8 +11,6 @@
 # (all backward passes are writen from first principle with exception of bkwd for BMM in _bkwd_x, _bkwd_p and _bkwd2)
 
 ### PARAMS + MODEL
-DROPOUT_RATE = 0.1 # TODO: move it out, and pass as paramteter
-
 import math
 import torch
 import triton
@@ -20,7 +18,7 @@ import triton.language as tl
 
 ### PARAMS: they are the same as for Torch.Func, so import
 
-from model_torch_func import init_transformer_gpt2, count_num_params
+from model_torch_func import init_transformer_gpt2, count_num_params, DROPOUT_RATE
 
 ### MODEL in TRITON
 
@@ -620,7 +618,7 @@ def t_scaled_dot_prod_attn_fwd3_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, a
                 q_stride0, q_stride1, q_stride2, k_t_stride0, k_t_stride1, k_t_stride2,
                 v_stride0, v_stride1, v_stride2, mask_stride0, mask_stride1, mask_stride2,
                 output_stride0, output_stride1, output_stride2, acts0_stride0, acts1_stride0,
-                train, p_gen_aux,
+                train, dropout_rate:tl.constexpr, p_gen_aux,
                 BS_H, N:tl.constexpr, D,
                 BLOCK_SIZE_Q_N: tl.constexpr, BLOCK_SIZE_K_T_N: tl.constexpr, BLOCK_SIZE_D: tl.constexpr,
                 Q_N_BLCKS: tl.constexpr,
@@ -687,7 +685,7 @@ def t_scaled_dot_prod_attn_fwd3_k(q_ptr, k_t_ptr, v_ptr, mask_ptr, output_ptr, a
                 blck_ls = tl.sum(acc, axis=1, keep_dims=True)       
                 n_ls = tl.exp(ms - n_ms) * ls + tl.exp(blck_ms - n_ms) * blck_ls
                 # TODO T: confirm that this is different enough seed per row (assumes that D_PID always equals to 0)
-                acc = dropout_k(acc, train, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
+                acc = dropout_k(acc, train, dropout_rate, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
 
                 # * V
                 v_blck_ptr = bs_h_v_ptr + k_t_n_offsets_mod[:,None] * v_stride1 + d_offsets_mod[None, :] * v_stride2
@@ -750,7 +748,7 @@ def t_scaled_dot_prod_attn_fwd3_t(qkv:torch.Tensor, mask:torch.Tensor, train=Tru
         mask.stride(0), mask.stride(1), mask.stride(2),
         output.stride(0), output.stride(1), output.stride(2),
         acts0.stride(0), acts1.stride(0),
-        train, p_gen_aux,
+        train, DROPOUT_RATE, p_gen_aux,
         BS*H, N, D,
         BLOCK_SIZE_Q_N=BLOCK_SIZE_Q_N, BLOCK_SIZE_K_T_N = BLOCK_SIZE_K_T_N, BLOCK_SIZE_D=BLOCK_SIZE_D,
         Q_N_BLCKS = triton.cdiv(N, BLOCK_SIZE_Q_N), # TODO T: Is there a way to do that cdiv inside kernel?
@@ -842,7 +840,7 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
                 dloss_dq_stride0, dloss_dq_stride1, dloss_dq_stride2,                                                                      
                 dloss_dk_stride0, dloss_dk_stride1, dloss_dk_stride2,                                   
                 dloss_dv_stride0, dloss_dv_stride1, dloss_dv_stride2,
-                train, p_gen_aux,
+                train, dropout_rate: tl.constexpr, p_gen_aux,
                 BS_H, N, D,
                 BLOCK_SIZE_Q_N: tl.constexpr, BLOCK_SIZE_K_T_N: tl.constexpr, BLOCK_SIZE_D: tl.constexpr,
                 num_stages: tl.constexpr
@@ -926,7 +924,7 @@ def t_scaled_dot_prod_attn_bkwd3_k(dloss_dx_ptr, q_ptr, k_t_ptr, v_ptr, output_p
                 attn = tl.where(mask_blck, attn, -1e9)
                 sa_pre_dropout = tl.exp(attn - attn_max)/attn_logits_sumexp
                 # TODO T: confirm that this is different enough seed per row (assumes that D_PID always equals to 0)
-                sa = dropout_k(sa_pre_dropout, train, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
+                sa = dropout_k(sa_pre_dropout, train, dropout_rate, p_gen_aux+bs_h_pid, q_n_offsets[:,None] + k_t_n_offsets[None, :])
 
                 # Propagate back
                 # dloss_dv=torch.einsum(f'cd, ce -> ed', dloss_dx, sa), dloss_dx is Q_N x D, sa is Q_N x K_T_N
@@ -1005,7 +1003,7 @@ def t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torch.
         dloss_dq.stride(0), dloss_dq.stride(1), dloss_dq.stride(2),        
         dloss_dk.stride(0), dloss_dk.stride(1), dloss_dk.stride(2),
         dloss_dv.stride(0), dloss_dv.stride(1), dloss_dv.stride(2),
-        train, p_gen_aux,
+        train, DROPOUT_RATE, p_gen_aux,
         BS*H, N, D,
         BLOCK_SIZE_Q_N=BLOCK_SIZE_Q_N, BLOCK_SIZE_K_T_N = BLOCK_SIZE_K_T_N, BLOCK_SIZE_D=BLOCK_SIZE_D,
         num_warps=num_warps, num_stages=num_stages)
@@ -1466,24 +1464,22 @@ def t_dropout_fwd(x, train=True, p_gen_aux=None):
     mask = torch.bernoulli(torch.full_like(x, 1-DROPOUT_RATE), generator=generator)
     
     return x * mask
-
-# TODO T: Think how to unify it with DROPOUT_RATE global variable above
-T_DROPOUT_RATE: triton.language.constexpr = 0.1
     
 @triton.jit
-def dropout_k(x, train, p_gen_aux, offsets):
+def dropout_k(x, train, dropout_rate, p_gen_aux, offsets):
     if train:
         random = tl.rand(p_gen_aux, offsets) 
-        x_mask = random>T_DROPOUT_RATE
+        x_mask = random>dropout_rate
         output = tl.where(x_mask, x, 0.0)  
     else:
-        output = x * (1-T_DROPOUT_RATE)
+        output = x * (1-dropout_rate)
     return output
 
 # Note that the kernel assumes that n_cols < BLOCK_SIZE
 @triton.jit
 def t_dropout_fwd_k(x_ptr,
                     train,
+                    dropout_rate: tl.constexpr,
                     p_gen_aux,
                     output_ptr,
                     input_row_stride,
@@ -1501,7 +1497,7 @@ def t_dropout_fwd_k(x_ptr,
         mask = offsets < n_cols
         x = tl.load(x_row_start_ptr + offsets, mask=mask, other=0.0)
         # TODO T: confirm that this is different enough seed per row
-        output = dropout_k(x, train, p_gen_aux+row_idx, offsets)
+        output = dropout_k(x, train, dropout_rate, p_gen_aux+row_idx, offsets)
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
     
@@ -1514,7 +1510,7 @@ def t_dropout_fwd_t(x: torch.Tensor, train=True, p_gen_aux=None):
     num_warps = 8
     num_stages = 2
     num_programs = min(n_rows, 480)
-    t_dropout_fwd_k[(num_programs,)](x_2d, train, p_gen_aux, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
+    t_dropout_fwd_k[(num_programs,)](x_2d, train, DROPOUT_RATE, p_gen_aux, output, x_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
     return output.reshape(x.shape)
 
 def t_dropout_bkwd(x, train=True, p_gen_aux=None):
@@ -1537,19 +1533,20 @@ def t_dropout_bkwd2(dloss_dx, x, train=True, p_gen_aux=None):
     return dloss_dx * mask
 
 @triton.jit
-def dropout_bkwd2_k(dloss_dx, train, p_gen_aux, offsets):
+def dropout_bkwd2_k(dloss_dx, train, dropout_rate, p_gen_aux, offsets):
     if train:
         random = tl.rand(p_gen_aux, offsets) # TODO T: Is this enough as diff seed per row?
-        x_mask = random>T_DROPOUT_RATE
+        x_mask = random>dropout_rate
         output = tl.where(x_mask, dloss_dx, 0.0)  
     else:
-        output = dloss_dx * (1-T_DROPOUT_RATE)
+        output = dloss_dx * (1-dropout_rate)
     return output
     
 # Note that the kernel assumes that n_cols < BLOCK_SIZE
 @triton.jit
 def t_dropout_bkwd2_k(dloss_dx_ptr,
                     train,
+                    dropout_rate: tl.constexpr,
                     p_gen_aux,
                     output_ptr,
                     dloss_dx_row_stride,
@@ -1566,7 +1563,7 @@ def t_dropout_bkwd2_k(dloss_dx_ptr,
         offsets = tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_cols
         dloss_dx = tl.load(dloss_dx_row_start_ptr + offsets, mask=mask, other=0.0)
-        output = dropout_bkwd2_k(dloss_dx, train, p_gen_aux+row_idx, offsets)
+        output = dropout_bkwd2_k(dloss_dx, train, dropout_rate, p_gen_aux+row_idx, offsets)
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
     
@@ -1579,7 +1576,7 @@ def t_dropout_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor, train=True, p_gen
     num_warps = 8
     num_stages = 2
     num_programs = min(n_rows, 480)
-    t_dropout_bkwd2_k[(num_programs,)](dloss_dx_2d, train, p_gen_aux, output, dloss_dx_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
+    t_dropout_bkwd2_k[(num_programs,)](dloss_dx_2d, train, DROPOUT_RATE, p_gen_aux, output, dloss_dx_2d.stride(0), output.stride(0), n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
     return output.reshape(dloss_dx.shape)
 
 def t_layernorm_fwd(layer_params, x):
