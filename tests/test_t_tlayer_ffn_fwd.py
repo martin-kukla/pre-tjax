@@ -2,7 +2,8 @@ import sys
 sys.path.append('../')
 
 import torch
-from model_triton import t_tlayer_ffn_fwd, t_gelu_fwd, t_tlayer_ffn_fwd_t
+from model_torch_func import tlayer_ffn_fwd, gelu
+from model_triton import t_tlayer_ffn_fwd_t, t_gelu_fwd
 
 BS, N, D = 8, 512, 768
 FFN = 4 * D
@@ -13,7 +14,7 @@ p2 = torch.randn((D, FFN), device="cuda")
 p3 = torch.randn((D,), device="cuda")
 params = (p0, p1, p2, p3)
 
-res1 = t_tlayer_ffn_fwd(params, aa, t_gelu_fwd)
+res1 = tlayer_ffn_fwd(params, aa, gelu)
 print(res1[-2:, -4:, -8:])
 
 
