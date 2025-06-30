@@ -10,6 +10,7 @@ layer_params = (torch.randn((768), device="cuda"), torch.randn((768), device="cu
 #aa = torch.randn((2, 768), device="cuda")
 aa = torch.randn((8, 512, 768), device="cuda")
 
+# TODO: move to torch_func's implementation instead
 res1 = t_layernorm_bkwd2_p(dloss_dx, layer_params, aa)
 print(res1[0].shape, res1[1].shape)
 
