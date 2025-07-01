@@ -37,11 +37,13 @@ assert torch.allclose(res1[1], res2[1], atol=atol, rtol=rtol), (res1[1].shape, r
 
 
 # dx
+print(f'\n\n###### DX')
 res1 = vjpfunc(dloss_dx)[1]
 print(res1.shape, res1[-2:, -4:, -8:])
 
 res2 = t_layernorm_bkwd2_x_t(dloss_dx, layer_params, aa)
 print(res2.shape, res2[-2:, -4:, -8:])
 
-pre_allclose(res1[0], res2[0], 'dx', atol=1e-1, rtol=1e-1)
+atol, rtol=1e-4, 1e-7
+pre_allclose(res1[0], res2[0], 'dx', atol=atol, rtol=rtol)
 assert torch.allclose(res1, res2, atol=atol, rtol=rtol), (res1.shape, res2.shape, res1[:2, :4, :8], res2[:2, :4, :8])
