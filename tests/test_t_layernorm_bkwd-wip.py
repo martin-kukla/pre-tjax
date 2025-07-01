@@ -35,6 +35,33 @@ def layernorm_fwd(layer_params, x):
 res1 = vjpfunc(dloss_dx)[1]
 print("RESULT:", res1.shape, res1[-2:, -4:, -8:])
 
+print(f'\n### t_layernorm_bkwd2_x')
+#from model_triton import t_layernorm_bkwd2_x
+# TODO XXX XXX: investigate why this is more memory efficient than my implementation above
+# (Inspired from llm.c)
+def normalized_x_bkwd2_plus(dloss_dx, x): # d [(x-x_mean)/x_std] / dx
+    # f(x) = x - x_mean, g(x) = x_std
+    BS, N = x.shape
+    x_mean = torch.mean(x, axis=-1, keepdims=True)
+    x_rstd = 1/torch.std(x, axis=-1, keepdims = True)
+    x_norm = (x - x_mean) * x_rstd
+    
+    n_adj = N/(N-1)
+    dloss_dx = dloss_dx - dloss_dx.mean(-1, keepdim=True) - x_norm * (dloss_dx * x_norm).mean(-1, keepdim=True) * n_adj
+    dloss_dx *= x_rstd
+    return dloss_dx
+
+def t_layernorm_bkwd2_x(dloss_dx, layer_params, x):
+    x_2d = x.reshape((-1, x.shape[-1]))
+    # TODO XXX XXX: investigate the difference in memory consumption between two
+    #return normalized_x_bkwd2(dloss_dx * layer_params[0], x_2d)
+    dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
+    return normalized_x_bkwd2_plus(dloss_dx_2d * layer_params[0], x_2d).reshape(dloss_dx.shape)
+
+res15 = t_layernorm_bkwd2_x(dloss_dx, layer_params, aa)
+print("RESULT:", res15.shape, res15[-2:, -4:, -8:])
+
+
 print(f'\n### TRITON')
 import triton
 import triton.language as tl
@@ -73,7 +100,7 @@ def t_layernorm_bkwd2_x_k(dloss_dx_ptr,
         # compute mean and std for x
         x_sum = tl.sum(x, axis=0)
         x_mu = x_sum/ n_cols
-        x_minus_mu = x - x_mu
+        x_minus_mu = tl.where(mask, x-x_mu, 0) #x - x_mu
         x_minus_mu2 = x_minus_mu * x_minus_mu
         x_minus_mu2_sum = tl.sum(x_minus_mu2, axis=0)
         x_sigma2 = x_minus_mu2_sum / (n_cols-1)
@@ -88,12 +115,15 @@ def t_layernorm_bkwd2_x_k(dloss_dx_ptr,
         # bkwd quantities
         dloss_dx_sum = tl.sum(dloss_dx, axis=0)
         dloss_dx_mu = dloss_dx_sum/n_cols
+        print(f'dloss_dx_mu', dloss_dx_mu)
         dloss_dx_x_norm = dloss_dx * x_norm
         dloss_dx_x_norm_sum = tl.sum(dloss_dx_x_norm, axis=0)
         dloss_dx_x_norm_mu = dloss_dx_x_norm_sum/n_cols
+        print(f'dloss_dx_x_norm_mu', dloss_dx_x_norm_mu)
         
         n_adj = n_cols/(n_cols-1) # adjust for estimated vs calculated sigma
         output = dloss_dx - dloss_dx_mu - x_norm * dloss_dx_x_norm_mu * n_adj
+        output = output/x_sigma
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
     
@@ -102,7 +132,7 @@ def t_layernorm_bkwd2_x_t(dloss_dx:torch.Tensor, layer_params: torch.Tensor, x: 
     dloss_dx_2d = dloss_dx.reshape((-1, dloss_dx.shape[-1]))
     x_2d = x.reshape((-1, x.shape[-1])) 
     n_rows, n_cols = x_2d.shape
-    BLOCK_SIZE = triton.next_power_of_2(n_cols) 
+    BLOCK_SIZE = 8 #triton.next_power_of_2(n_cols) # TODO: Fix for BLOCK_SIZE!= n_cols
     print(f'XXX', BLOCK_SIZE, n_cols)
     output = torch.empty_like(x_2d)
     # TODO T: The below numbers were tuned for A10 by choosing num_warps=8
