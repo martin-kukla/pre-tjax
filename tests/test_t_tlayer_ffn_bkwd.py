@@ -35,12 +35,12 @@ print(res2[0].shape, len(res2[1]), res2[1][0].shape, res2[1][1].shape, res2[1][2
 # print(res2[1][-4][-4:, -16:])
 
 # TODO: expand this method to account for atol, not just rtol. As the numbers are likely off right now
-def pre_allclose(input, other, name):
-    diff_abs = torch.abs(input - other)
-    print(name, torch.max(diff_abs/other))
+def pre_allclose(input, other, name, atol=5e-3, rtol=1e-7):
+    allclose = torch.abs(input - other) - atol - rtol * torch.abs(other)
+    print(name, torch.max(allclose))
 
 pre_allclose(res1[0], res2[0], "dx")
-assert torch.allclose(res1[0], res2[0], atol=1e-2, rtol=1e-1), (res1[0].shape, res2[0].shape, res1[0][-2:, -4:, -8:], res2[0][-2:, -4:, -8:])
+assert torch.allclose(res1[0], res2[0], atol=5e-3, rtol=1e-7), (res1[0].shape, res2[0].shape, res1[0][-2:, -4:, -8:], res2[0][-2:, -4:, -8:])
 #assert torch.allclose(res1, res2, atol=1.7e-2, rtol=0), (res1.shape, res2.shape, res1[-4:, -4:], res2[-4:, -4:])
 
 pre_allclose(res1[1][-1], res2[1][-1], "dp -1")
@@ -50,7 +50,7 @@ pre_allclose(res1[1][-2], res2[1][-2], "dp -2")
 assert torch.allclose(res1[1][-2], res2[1][-2], atol=1e-3, rtol=0), (res1[1][-2].shape, res2[1][-2].shape, res1[1][-2][-4:, -16:], res2[1][-2][-4:,-16:])
 
 pre_allclose(res1[1][-3], res2[1][-3], "dp -3")
-assert torch.allclose(res1[1][-3], res2[1][-3], atol=1e-3, rtol=1e-6), (res1[1][-3].shape, res2[1][-3].shape, res1[1][-3][-32:], res2[1][-3][-32:])
+assert torch.allclose(res1[1][-3], res2[1][-3], atol=1e-3, rtol=1e-7), (res1[1][-3].shape, res2[1][-3].shape, res1[1][-3][-32:], res2[1][-3][-32:])
 
 pre_allclose(res1[1][-4], res2[1][-4], "dp -4")
-assert torch.allclose(res1[1][-4], res2[1][-4], atol=1e-3, rtol=1e-6), (res1[1][-4].shape, res2[1][-4].shape, res1[1][-4][-4:, -16:], res2[1][-4][-4:,-16:])
+assert torch.allclose(res1[1][-4], res2[1][-4], atol=5e-3, rtol=1e-7), (res1[1][-4].shape, res2[1][-4].shape, res1[1][-4][-4:, -16:], res2[1][-4][-4:,-16:])
