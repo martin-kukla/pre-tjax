@@ -4,16 +4,24 @@ import torch
 from model_torch_func import layernorm_fwd
 #from model_triton import t_layernorm_bkwd2_p_t, t_layernorm_bkwd2_x_t
 
-dloss_dx = torch.randn((8, 512, 768), device="cuda")
-layer_params = (torch.ones((768), device="cuda"), torch.zeros((768), device="cuda")) # real init
-#layer_params = (torch.randn((768), device="cuda"), torch.randn((768), device="cuda")) # unreal init
-aa = torch.randn((8, 512, 768), device="cuda")
+BS, N, D = 1, 1, 4 #8, 512, 768
+dloss_dx = torch.tensor([[[ 0.7227,  0.6544, -0.7753,  0.5889]]], device="cuda")
+#dloss_dx = torch.randn((BS, N, D), device="cuda")
+layer_params = (torch.ones((D), device="cuda"), torch.zeros((D), device="cuda"))
+aa = torch.tensor([[[-0.2614,  0.9828, -0.1427,  0.1716]]], device="cuda")
+#aa = torch.randn((BS, N, D), device="cuda")
+
+print(f'dloss_dx', dloss_dx)
+print(f'aa', aa)
 
 
 # dx
 (_, vjpfunc) = torch.func.vjp(layernorm_fwd, layer_params, aa)
 res1 = vjpfunc(dloss_dx)[1]
 print(res1.shape, res1[-2:, -4:, -8:])
+
+# import os
+# os.environ["TRITON_INTERPRET"] = "1"
 
 import triton
 import triton.language as tl
