@@ -1836,7 +1836,7 @@ def t_layernorm_bkwd2_x_k(dloss_dx_ptr,
         # compute mean and std for x
         x_sum = tl.sum(x, axis=0)
         x_mu = x_sum/ n_cols
-        x_minus_mu = x - x_mu
+        x_minus_mu = tl.where(mask, x-x_mu, 0)
         x_minus_mu2 = x_minus_mu * x_minus_mu
         x_minus_mu2_sum = tl.sum(x_minus_mu2, axis=0)
         x_sigma2 = x_minus_mu2_sum / (n_cols-1)
@@ -1854,6 +1854,7 @@ def t_layernorm_bkwd2_x_k(dloss_dx_ptr,
         
         n_adj = n_cols/(n_cols-1) # adjust for estimated vs calculated sigma
         output = dloss_dx - dloss_dx_mu - x_norm * dloss_dx_x_norm_mu * n_adj
+        output = output/x_sigma
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         tl.store(output_row_start_ptr + offsets, output, mask=mask)
     
