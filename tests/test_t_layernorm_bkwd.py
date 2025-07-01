@@ -2,13 +2,12 @@ import sys
 sys.path.append('../')
 import torch
 from model_torch_func import layernorm_fwd
-from model_triton import t_layernorm_bkwd2_p, t_layernorm_bkwd2_p_t
+from model_triton import t_layernorm_bkwd2_p_t
 
-dloss_dx = torch.randn((8, 512, 768), device="cuda") #dloss_dx = torch.randn((1, 768), device="cuda")
-#Two shapes are being used: [8, 12, 512, 512], and 4096, 35374
+dloss_dx = torch.randn((8, 512, 768), device="cuda")
 layer_params = (torch.ones((768), device="cuda"), torch.zeros((768), device="cuda")) # real init
 #layer_params = (torch.randn((768), device="cuda"), torch.randn((768), device="cuda")) # unreal init
-aa = torch.randn((8, 512, 768), device="cuda") #aa = torch.randn((2, 768), device="cuda")
+aa = torch.randn((8, 512, 768), device="cuda")
 
 (_, vjpfunc) = torch.func.vjp(layernorm_fwd, layer_params, aa)
 res1 = vjpfunc(dloss_dx)[0]
