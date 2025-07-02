@@ -71,16 +71,17 @@ weight_decay_mask = tuple([ tuple([not (item.ndim==1 and all(item==0)) for item 
 
 
 ###############################################
-### Tests (forward pass + memory) TODO XXX: Remove
+### Tests (forward pass + memory)
 ###############################################
 if args.test:
     # Testing forward pass for triton (eval only)
     # Remaining TODOs: 1) support packed batches in Triton's FlashAttention. 2) fix the mask for non-packed batches (see the hotfix below)
     from model_torch_func import batched_forward_gpt2
-    from model_triton import t_gpt2_forward, t_gpt2_forward_with_acts, t_gpt2_forward_with_acts_t
-    from tokenized_dataset import get_batched_examples
+    from model_triton import t_gpt2_forward_with_acts_t
     test_batch_size = 4
-    # Note, the triton version doesn't support the packed batches (i.e. it only supports lower triangular mask)
+    # Note, both version pass the test. I am still wondering whether _packed is properly supported in torch/tirton world
+    # JAX version learns slightly faster, which could be explainable by its capability to handle _packed unlike torch/triton. 
+    # At this point, it's just hypothesis
     #_, y, _, y_mask, _, _, y_indices = next(get_batched_examples_packed(ds, test_batch_size, seq_len, START_TOK, END_TOK, pack_frac=0.75, skip_n_rows = 0))
     _, y, _, y_mask, _, _, y_indices = next(get_batched_examples(ds, test_batch_size, seq_len, START_TOK, END_TOK, skip_n_rows = 0))
 
