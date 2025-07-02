@@ -6,6 +6,7 @@
 import argparse
 parser = argparse.ArgumentParser("train_gpt2_trition")
 parser.add_argument("backend", help="Either 'torchfunc_jit', 'triton', 'pre-triton' or 'debug_jacs'.", type=str)
+parser.add_argument("--test", action='store_true')
 args = parser.parse_args()
 assert args.backend in ["torchfunc_jit", "triton", "pre-triton", "debug_jacs"]
 
@@ -72,55 +73,98 @@ weight_decay_mask = tuple([ tuple([not (item.ndim==1 and all(item==0)) for item 
 ###############################################
 ### Tests (forward pass + memory) TODO XXX: Remove
 ###############################################
-# Testing forward pass for triton (eval only)
-# Remaining TODOs: 1) support packed batches in Triton's FlashAttention. 2) fix the mask for non-packed batches (see the hotfix below)
-from model_torch_func import batched_forward_gpt2
-from model_triton import t_gpt2_forward, t_gpt2_forward_with_acts, t_gpt2_forward_with_acts_t
-from tokenized_dataset import get_batched_examples
-test_batch_size = 8
-# Note, the triton version doesn't support the packed batches (i.e. it only supports lower triangular mask)
-#_, y, _, y_mask, _, _, y_indices = next(get_batched_examples_packed(ds, test_batch_size, seq_len, START_TOK, END_TOK, pack_frac=0.75, skip_n_rows = 0))
-_, y, _, y_mask, _, _, y_indices = next(get_batched_examples(ds, test_batch_size, seq_len, START_TOK, END_TOK, skip_n_rows = 0))
+if args.test:
+    # Testing forward pass for triton (eval only)
+    # Remaining TODOs: 1) support packed batches in Triton's FlashAttention. 2) fix the mask for non-packed batches (see the hotfix below)
+    from model_torch_func import batched_forward_gpt2
+    from model_triton import t_gpt2_forward, t_gpt2_forward_with_acts, t_gpt2_forward_with_acts_t
+    from tokenized_dataset import get_batched_examples
+    test_batch_size = 4
+    # Note, the triton version doesn't support the packed batches (i.e. it only supports lower triangular mask)
+    #_, y, _, y_mask, _, _, y_indices = next(get_batched_examples_packed(ds, test_batch_size, seq_len, START_TOK, END_TOK, pack_frac=0.75, skip_n_rows = 0))
+    _, y, _, y_mask, _, _, y_indices = next(get_batched_examples(ds, test_batch_size, seq_len, START_TOK, END_TOK, skip_n_rows = 0))
 
-y = torch.tensor(y, dtype=torch.int32, device="cuda")
-y_mask = torch.tensor(y_mask, dtype=torch.bool, device="cuda")
-y_indices = torch.tensor(y_indices, dtype=torch.int16, device="cuda")
-y_in = y[:, :-1]
-y_out = y[:, 1:]
-logits_torch_func = batched_forward_gpt2(params, y_in, y_mask, y_indices, False) 
-logits_triton, _ = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, False) 
-# compare only on non-padded positions:
-logits_torch_func=torch.where(y_out.unsqueeze(2)!=0, logits_torch_func, 0)
-logits_triton=torch.where(y_out.unsqueeze(2)!=0, logits_triton, 0)  
+    y = torch.tensor(y, dtype=torch.int32, device="cuda")
+    y_mask = torch.tensor(y_mask, dtype=torch.bool, device="cuda")
+    y_indices = torch.tensor(y_indices, dtype=torch.int16, device="cuda")
 
-assert torch.allclose(logits_torch_func, logits_triton, rtol=1e-2, atol=5e-3), (logits_torch_func.shape, logits_triton.shape, logits_torch_func[-2:, -4:, -10:], logits_triton[-2:, -4:, -10:])
-print ("Forward test succesful")
+    ## FORWARD test
+    y_in = y[:, :-1]
+    y_out = y[:, 1:]
+    logits_torch_func = batched_forward_gpt2(params, y_in, y_mask, y_indices, False) 
+    logits_triton, _ = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, False) 
+    # compare only on non-padded positions:
+    logits_torch_func=torch.where(y_out.unsqueeze(2)!=0, logits_torch_func, 0)
+    logits_triton=torch.where(y_out.unsqueeze(2)!=0, logits_triton, 0)  
 
-# # Testing Memory Usage. I decided not to get too deep into it, since this uses torch.grad + torch.compile..
-# TODO XXX: It's still puzzling that the maximum batch_size which torchfunc's version can do is 8 in comparison to 16 by JAX...
-# import math
+    assert torch.allclose(logits_torch_func, logits_triton, rtol=1e-2, atol=5e-3), (logits_torch_func.shape, logits_triton.shape, logits_torch_func[-2:, -4:, -10:], logits_triton[-2:, -4:, -10:])
+    print ("Forward pass test succesful")
 
-# def convert_size(size_bytes):
-#    if size_bytes == 0:
-#        return "0B"
-#    size_name = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
-#    i = int(math.floor(math.log(size_bytes, 1024)))
-#    p = math.pow(1024, i)
-#    s = round(size_bytes / p, 2)
-#    return "%s %s" % (s, size_name[i])
+    from loss_and_optimizer_triton import t_loss_bkwd3_t, uncompiled_grad_loss, sample_p_gen_aux
+    #(params, y, y_mask, y_indices, train=True, p_gen_aux=sample_p_gen_aux(params))
 
-# def print_mem():
-#     print(convert_size(torch.cuda.memory_allocated()))
+    ## BACKWARD test
 
-# print_mem()
-# _, y, _, y_mask, _, _, y_indices = next(get_batched_examples_packed(ds, 8, seq_len, START_TOK, END_TOK, pack_frac=0.75, skip_n_rows = 0))
-# y = torch.tensor(y, dtype=torch.int32, device="cuda")
-# y_mask = torch.tensor(y_mask, dtype=torch.bool, device="cuda")
-# y_indices = torch.tensor(y_indices, dtype=torch.int16, device="cuda")
-# print_mem()
-# loss_val, (_, acc, _) = loss_train(params, y, y_mask, y_indices)
-# #grads, (loss_val, acc, _) = grad_loss(params, y, y_mask, y_indices)
-# print_mem()
+    from loss_and_optimizer_triton import _g_l2norm_squared
+    import math
+    def grad_l2norms(grads_grps):
+        grad_l2norms = []
+        for i, g_grp in enumerate(grads_grps):
+            i_grad_l2norms = []
+            shapes = []
+            for j, g in enumerate(g_grp):
+                grad_l2norm = math.sqrt(_g_l2norm_squared(g)) #math.sqrt(sum(_g_l2norm_squared(g)))
+                i_grad_l2norms.append(grad_l2norm)
+                shapes.append(g.shape)
+            #print('i, i_grad_l2norms', i, i_grad_l2norms)
+            #print('i, shapes', i, shapes)
+            grad_l2norms.append(i_grad_l2norms)
+        return grad_l2norms
+
+    # Compare loss values
+    grads_torch_func, (loss_val_torch_func, acc_torch_func, _) =  uncompiled_grad_loss(params, y, y_mask, y_indices, train=True, p_gen_aux = sample_p_gen_aux(params))
+    grads_triton, (loss_val_triton, acc_triton, _) = t_loss_bkwd3_t(params, y, y_mask, y_indices, train=True, p_gen_aux = sample_p_gen_aux(params))
+    print(f'Loss torch_func: {loss_val_torch_func}, triton: {loss_val_triton}')
+    rtol, atol = 5e-3, 1e-4 #5e-4, 1e-5 # Because of the dropout, we need to relax it (if dropout set to 0, use the latter)
+    assert torch.allclose(loss_val_torch_func, loss_val_triton, rtol=rtol, atol=atol), (loss_val_torch_func, loss_val_triton) 
+    
+    # Compare grad l2 norms
+    grad_l2norms_torch_func = grad_l2norms(grads_torch_func)
+    grad_l2norms_triton = grad_l2norms(grads_triton)
+    for a, b in zip(grad_l2norms_torch_func, grad_l2norms_triton):
+        torch.allclose(torch.tensor(a), torch.tensor(b))
+    print('Backward pass test succefull')
+
+
+    # # Testing Memory Usage. I decided not to get too deep into it, since this uses torch.grad + torch.compile..
+    # TODO XXX: It's still puzzling that the maximum batch_size which torchfunc's version can do is 8 in comparison to 16 by JAX...
+    # import math
+
+    # def convert_size(size_bytes):
+    #    if size_bytes == 0:
+    #        return "0B"
+    #    size_name = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
+    #    i = int(math.floor(math.log(size_bytes, 1024)))
+    #    p = math.pow(1024, i)
+    #    s = round(size_bytes / p, 2)
+    #    return "%s %s" % (s, size_name[i])
+
+    # def print_mem():
+    #     print(convert_size(torch.cuda.memory_allocated()))
+
+    # print_mem()
+    # _, y, _, y_mask, _, _, y_indices = next(get_batched_examples_packed(ds, 8, seq_len, START_TOK, END_TOK, pack_frac=0.75, skip_n_rows = 0))
+    # y = torch.tensor(y, dtype=torch.int32, device="cuda")
+    # y_mask = torch.tensor(y_mask, dtype=torch.bool, device="cuda")
+    # y_indices = torch.tensor(y_indices, dtype=torch.int16, device="cuda")
+    # print_mem()
+    # loss_val, (_, acc, _) = loss_train(params, y, y_mask, y_indices)
+    # #grads, (loss_val, acc, _) = grad_loss(params, y, y_mask, y_indices)
+    # print_mem()
+    
+    # ugly..
+    import sys
+    sys.exit(0)
 
 
 ###############################################
