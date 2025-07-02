@@ -7,6 +7,7 @@ import argparse
 parser = argparse.ArgumentParser("train_gpt2_trition")
 parser.add_argument("backend", help="Either 'torchfunc_jit', 'triton', 'pre-triton' or 'debug_jacs'.", type=str)
 parser.add_argument("--test", action='store_true')
+parser.add_argument("--profile", action='store_true')
 args = parser.parse_args()
 assert args.backend in ["torchfunc_jit", "triton", "pre-triton", "debug_jacs"]
 
@@ -160,6 +161,41 @@ if args.test:
     # loss_val, (_, acc, _) = loss_train(params, y, y_mask, y_indices)
     # #grads, (loss_val, acc, _) = grad_loss(params, y, y_mask, y_indices)
     # print_mem()
+    
+    # ugly..
+    import sys
+    sys.exit(0)
+    
+###############################################
+### Profile (forward pass)
+###############################################
+if args.profile:
+    from model_triton import t_gpt2_forward_with_acts_t
+    test_batch_size = 8
+    #_, y, _, y_mask, _, _, y_indices = next(get_batched_examples_packed(ds, test_batch_size, seq_len, START_TOK, END_TOK, pack_frac=0.75, skip_n_rows = 0))
+    _, y, _, y_mask, _, _, y_indices = next(get_batched_examples(ds, test_batch_size, seq_len, START_TOK, END_TOK, skip_n_rows = 0))
+
+    y = torch.tensor(y, dtype=torch.int32, device="cuda")
+    y_mask = torch.tensor(y_mask, dtype=torch.bool, device="cuda")
+    y_indices = torch.tensor(y_indices, dtype=torch.int16, device="cuda")
+
+    ## FORWARD test
+    y_in = y[:, :-1]
+    y_out = y[:, 1:]
+    
+    N=10
+    from torch.profiler import profile, record_function, ProfilerActivity
+    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
+    with profile(activities=activities, record_shapes=True) as prof:
+        for _ in range(N):
+            logits_triton, _ = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, False) 
+    prof.export_chrome_trace("trace.json")
+    print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20, max_name_column_width=125, top_level_events_only=True, header="Order by CPU"))
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20, max_name_column_width=125, top_level_events_only=True, header="Order by GPU"))
+
+    ## BACKWARD test
+    #from loss_and_optimizer_triton import t_loss_bkwd3_t, sample_p_gen_aux
+    #grads_triton, (loss_val_triton, acc_triton, _) = t_loss_bkwd3_t(params, y, y_mask, y_indices, train=True, p_gen_aux = sample_p_gen_aux(params))
     
     # ugly..
     import sys
