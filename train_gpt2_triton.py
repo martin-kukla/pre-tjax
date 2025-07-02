@@ -71,11 +71,11 @@ weight_decay_mask = tuple([ tuple([not (item.ndim==1 and all(item==0)) for item 
 
 
 ###############################################
-### Tests (forward pass + memory)
+### Tests (forward and backward pass + memory)
 ###############################################
 if args.test:
     # Testing forward pass for triton (eval only)
-    # Remaining TODOs: 1) support packed batches in Triton's FlashAttention. 2) fix the mask for non-packed batches (see the hotfix below)
+    # Remaining TODOs: 1) support packed batches in Triton's FlashAttention. Update 7/2: Is this still remaining issue? see comment below..
     from model_torch_func import batched_forward_gpt2
     from model_triton import t_gpt2_forward_with_acts_t
     test_batch_size = 4
@@ -101,11 +101,9 @@ if args.test:
     assert torch.allclose(logits_torch_func, logits_triton, rtol=1e-2, atol=5e-3), (logits_torch_func.shape, logits_triton.shape, logits_torch_func[-2:, -4:, -10:], logits_triton[-2:, -4:, -10:])
     print ("Forward pass test succesful")
 
-    from loss_and_optimizer_triton import t_loss_bkwd3_t, uncompiled_grad_loss, sample_p_gen_aux
-    #(params, y, y_mask, y_indices, train=True, p_gen_aux=sample_p_gen_aux(params))
 
     ## BACKWARD test
-
+    from loss_and_optimizer_triton import t_loss_bkwd3_t, uncompiled_grad_loss, sample_p_gen_aux
     from loss_and_optimizer_triton import _g_l2norm_squared
     import math
     def grad_l2norms(grads_grps):
