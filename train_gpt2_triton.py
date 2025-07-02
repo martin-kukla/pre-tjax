@@ -183,7 +183,7 @@ if args.profile:
     y_in = y[:, :-1]
     y_out = y[:, 1:]
     
-    N=10
+    N=100
     from torch.profiler import profile, record_function, ProfilerActivity
     activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
     with profile(activities=activities, record_shapes=True) as prof:
@@ -194,6 +194,12 @@ if args.profile:
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20, max_name_column_width=125, top_level_events_only=True, header="Order by GPU"))
 
     ## BACKWARD test
+    
+    # Sanity check that backward pass dominates training loop. Indeed, this is a case around 3.25 it/s
+    #from tqdm import tqdm
+    #for _ in tqdm(range(N)):
+    #    grads_triton, (loss_val_triton, acc_triton, _) = t_loss_bkwd3_t(params, y, y_mask, y_indices, train=True, p_gen_aux = sample_p_gen_aux(params))
+        
     #from loss_and_optimizer_triton import t_loss_bkwd3_t, sample_p_gen_aux
     #grads_triton, (loss_val_triton, acc_triton, _) = t_loss_bkwd3_t(params, y, y_mask, y_indices, train=True, p_gen_aux = sample_p_gen_aux(params))
     
