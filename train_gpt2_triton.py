@@ -184,51 +184,63 @@ if args.profile:
     y_out = y[:, 1:]
     
 
+    from loss_and_optimizer_triton import t_loss_bkwd3_t, sample_p_gen_aux
+    # CUDA GRAPH (WIP):
+    # For forward pass, it increases throughput from 11.08it/s to 11.05it/s
+    # For backward pass, it increases throughput from 3.25it/s to 3.27it/s - rather small?
     
-#     # CUDA GRAPH (WIP):
-#     # For forward pass, it increases througput from 11.08it/s to 11.05it/s
     
-#     # Placeholder input used for capture
-#     static_y_in = torch.empty_like(y_in, device="cuda")
-#     static_y_mask = torch.empty_like(y_mask, device="cuda")
-#     static_y_indices = torch.empty_like(y_indices, device="cuda")    
+    # Placeholder input used for capture
+    #static_y_in = torch.empty_like(y_in, device="cuda")
+    static_y = torch.empty_like(y, device="cuda")
+    static_y_mask = torch.empty_like(y_mask, device="cuda")
+    static_y_indices = torch.empty_like(y_indices, device="cuda")    
     
-#     # Warmup needs to be performed on real data, no?
-#     static_y_in.copy_(y_in)
-#     static_y_mask.copy_(y_mask)
-#     static_y_indices.copy_(y_indices)
+    # Warmup needs to be performed on real data, no?
+    #static_y_in.copy_(y_in)
+    static_y.copy_(y)
+    static_y_mask.copy_(y_mask)
+    static_y_indices.copy_(y_indices)
+    static_p_gen_aux = sample_p_gen_aux(params)
         
-#     # Warmup before capture
-#     s = torch.cuda.Stream()
-#     s.wait_stream(torch.cuda.current_stream())
-#     with torch.cuda.stream(s):
-#         for _ in range(3):
-#             static_logits_triton = t_gpt2_forward_with_acts_t(params, static_y_in, static_y_mask, static_y_indices, False) 
-#     torch.cuda.current_stream().wait_stream(s)
+    # Warmup before capture
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(3):
+            #static_logits_triton = t_gpt2_forward_with_acts_t(params, static_y_in, static_y_mask, static_y_indices, False) 
+            _, (static_loss_val_triton, _, _) = t_loss_bkwd3_t(params, static_y, static_y_mask, static_y_indices, train=True, p_gen_aux = static_p_gen_aux)
+    torch.cuda.current_stream().wait_stream(s)
 
-#     g = torch.cuda.CUDAGraph()
-#     with torch.cuda.graph(g):
-#         static_logits_triton, _ = t_gpt2_forward_with_acts_t(params, static_y_in, static_y_mask, static_y_indices, False) 
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        #static_logits_triton, _ = t_gpt2_forward_with_acts_t(params, static_y_in, static_y_mask, static_y_indices, False) 
+        _, (static_loss_val_triton, _, _) = t_loss_bkwd3_t(params, static_y, static_y_mask, static_y_indices, train=True, p_gen_aux = static_p_gen_aux)
         
         
+    total = 0
+    N=1000
+    from tqdm import tqdm
+    for _ in tqdm(range(N)):
+        #static_y_in.copy_(y_in)
+        static_y.copy_(y)
+        static_y_mask.copy_(y_mask)
+        static_y_indices.copy_(y_indices)
+        #static_p_gen_aux.copy_(sample_p_gen_aux(params)) # TODO: think what to do about this one, as it's a list not Tensor!
+        #logits_triton, _ = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, False) 
+        g.replay()
+        #total += static_logits_triton[0,0,0].item()
+        total += static_loss_val_triton.item()
+    print(total)
+
 #     total = 0
 #     N=1000
 #     from tqdm import tqdm
 #     for _ in tqdm(range(N)):
-#         static_y_in.copy_(y_in)
-#         static_y_mask.copy_(y_mask)
-#         static_y_indices.copy_(y_indices)
 #         #logits_triton, _ = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, False) 
-#         g.replay()
-#         total += static_logits_triton[0,0,0].item()
-#     print(total)
-
-#     total = 0
-#     N=1000
-#     from tqdm import tqdm
-#     for _ in tqdm(range(N)):
-#         logits_triton, _ = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, False) 
-#         total += logits_triton[0,0,0].item()
+#         #total += logits_triton[0,0,0].item()
+#         _, (loss_val_triton, _, _) = t_loss_bkwd3_t(params, y, y_mask, y_indices, train=True, p_gen_aux = sample_p_gen_aux(params))
+#         total += loss_val_triton.item()
 #     print(total)
         
 #     from loss_and_optimizer_triton import t_loss_bkwd3_t, sample_p_gen_aux
