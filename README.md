@@ -6,7 +6,7 @@ Transformers written from first principle in JAX/Torch.Func/Triton; Comparison o
 The below graph plots validation loss against global step. One can see that the results are quite consistent across the implementations in three different frameworks (JAX/Torch.Func/Triton).
 ![Screenshot 2025-07-02 at 06 04 22](https://github.com/user-attachments/assets/571871c7-d189-4a5d-8da6-8da77ad205d9)
 
-2. The next graph plots validation loss against relative wall time. You can see that the JaX implementaion is the fastest (`4.7it/s`), followed by Torch.Func (`4.06it/s`) and Triton (`3.15it/s`). <ins>It's worth noting that the Triton implementation doesn't use `cudagraph`, which likely significantly impacts its running time (due to the CPU launching overhead).</ins>
+2. The next graph plots validation loss against relative wall time. You can see that the JaX implementaion is the fastest (`4.7it/s`), followed by Torch.Func (`4.06it/s`) and Triton (`3.15it/s`). <ins>Triton implementation requires more work.</ins>
 ![Screenshot 2025-07-02 at 06 05 41](https://github.com/user-attachments/assets/16d3c2a8-406c-4733-9395-2a0aca44b64a)
 
 3. Finally, when it comes to the memory usage, **Triton implementation uses the peak GPU memory of 5.8GB, while Torch.Func's peak memory is 18.8GB**. I don't discuss JaX here (one can still make meaningful comparison despite its specific memory allocation). 
