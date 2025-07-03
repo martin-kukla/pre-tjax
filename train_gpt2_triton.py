@@ -183,15 +183,67 @@ if args.profile:
     y_in = y[:, :-1]
     y_out = y[:, 1:]
     
-    N=100
-    from torch.profiler import profile, record_function, ProfilerActivity
-    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
-    with profile(activities=activities, record_shapes=True) as prof:
-        for _ in range(N):
-            logits_triton, _ = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, False) 
-    prof.export_chrome_trace("trace.json")
-    print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20, max_name_column_width=125, top_level_events_only=True, header="Order by CPU"))
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20, max_name_column_width=125, top_level_events_only=True, header="Order by GPU"))
+
+    
+#     # CUDA GRAPH (WIP):
+#     # For forward pass, it increases througput from 11.08it/s to 11.05it/s
+    
+#     # Placeholder input used for capture
+#     static_y_in = torch.empty_like(y_in, device="cuda")
+#     static_y_mask = torch.empty_like(y_mask, device="cuda")
+#     static_y_indices = torch.empty_like(y_indices, device="cuda")    
+    
+#     # Warmup needs to be performed on real data, no?
+#     static_y_in.copy_(y_in)
+#     static_y_mask.copy_(y_mask)
+#     static_y_indices.copy_(y_indices)
+        
+#     # Warmup before capture
+#     s = torch.cuda.Stream()
+#     s.wait_stream(torch.cuda.current_stream())
+#     with torch.cuda.stream(s):
+#         for _ in range(3):
+#             static_logits_triton = t_gpt2_forward_with_acts_t(params, static_y_in, static_y_mask, static_y_indices, False) 
+#     torch.cuda.current_stream().wait_stream(s)
+
+#     g = torch.cuda.CUDAGraph()
+#     with torch.cuda.graph(g):
+#         static_logits_triton, _ = t_gpt2_forward_with_acts_t(params, static_y_in, static_y_mask, static_y_indices, False) 
+        
+        
+#     total = 0
+#     N=1000
+#     from tqdm import tqdm
+#     for _ in tqdm(range(N)):
+#         static_y_in.copy_(y_in)
+#         static_y_mask.copy_(y_mask)
+#         static_y_indices.copy_(y_indices)
+#         #logits_triton, _ = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, False) 
+#         g.replay()
+#         total += static_logits_triton[0,0,0].item()
+#     print(total)
+
+#     total = 0
+#     N=1000
+#     from tqdm import tqdm
+#     for _ in tqdm(range(N)):
+#         logits_triton, _ = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, False) 
+#         total += logits_triton[0,0,0].item()
+#     print(total)
+        
+#     from loss_and_optimizer_triton import t_loss_bkwd3_t, sample_p_gen_aux
+#     for _ in tqdm(range(N)):
+#        grads_triton, (loss_val_triton, acc_triton, _) = t_loss_bkwd3_t(params, y, y_mask, y_indices, train=True, p_gen_aux = sample_p_gen_aux(params))
+    
+#     N=100
+#     from torch.profiler import profile, record_function, ProfilerActivity
+#     activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
+#     with profile(activities=activities, record_shapes=True) as prof:
+#         for _ in range(N):
+#             logits_triton, _ = t_gpt2_forward_with_acts_t(params, y_in, y_mask, y_indices, False) 
+#     prof.export_chrome_trace("trace.json")
+#     print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20, max_name_column_width=125, top_level_events_only=True, header="Order by CPU"))
+#     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20, max_name_column_width=125, top_level_events_only=True, header="Order by GPU"))
 
     ## BACKWARD test
     
