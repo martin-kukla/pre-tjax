@@ -8,6 +8,7 @@ parser = argparse.ArgumentParser("train_gpt2_trition")
 parser.add_argument("backend", help="Either 'torchfunc_jit', 'triton', 'pre-triton' or 'debug_jacs'.", type=str)
 parser.add_argument("--test", action='store_true')
 parser.add_argument("--profile", action='store_true')
+parser.add_argument("--eval_only", action='store_true')
 args = parser.parse_args()
 assert args.backend in ["torchfunc_jit", "triton", "pre-triton", "debug_jacs"]
 
@@ -247,7 +248,7 @@ import math
 # Infra training params
 run_name = datetime.datetime.now().strftime("%h%d_%H-%M-%S")
 log_every_steps_multidevice = 10
-eval_every_steps_multidevice = 500
+eval_every_steps_multidevice = 1 if args.eval_only else 500 # clumsy support for eval only
 eval_n_examples = 4
 writer = SummaryWriter(f'/lego/storage/output/runs/{run_name}')
 #checkpoint_every_steps = None #500 * 8 machines
@@ -308,7 +309,8 @@ while True:
             lr = max_lr * (1 + math.cos(math.pi * t_step/t_max))/2
 
         #params = sgd(params, grads, lr)
-        if i > 0 and i % gradient_accumulations_steps == 0:
+        # NB: clumsy support for eval only. Do dummy training pass without updating params
+        if i > 0 and i % gradient_accumulations_steps == 0 and not args.eval_only: 
             for grp_i in range(len(grads)):
                 for p_i in range(len(grads[grp_i])):
                     #grads[grp_i][p_i] =  grads[grp_i][p_i].at[:].divide(gradient_accumulations_steps) #TODO XXX: possible in place operation
@@ -393,6 +395,11 @@ while True:
             hellaswag_acc = sum(hellaswag_accs)/len(hellaswag_accs)
             print(f'HellaSwag score:', hellaswag_acc)
             writer.add_scalar('eval/hellaswag', hellaswag_acc, i_multidevice)
+            
+            if args.eval_only: # clumsy support for eval_only flag
+                # ugly..
+                import sys
+                sys.exit(0)
                 
         i = i + 1
         ds_train_rows_read = ds_train_rows_read + len(y)
