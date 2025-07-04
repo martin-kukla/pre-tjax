@@ -199,21 +199,17 @@ def t_avg_cross_entropy_loss_bkwd3_t(y_labels, x_logits):
 def accuracy(y_labels, x_logits):
     return torch.nanmean(torch.where(y_labels!=0, y_labels == torch.argmax(x_logits, axis=-1), float('nan')))
 
-# @partial(jax.jit, static_argnames=['sample_len', 'start_tok', 'end_tok']) # TODO XXX: don't pass y_mask nor y_indices (pass batch_size though!)
-# def predict(params, y_mask, y_indices, sample_len, start_tok, end_tok): # TODO: code up not-scanned version, which could be faster on GPU
-#     def predict_step(step_i, y):
-#         # TODO: Cache key-value pairs
-#         new_y = batched_forward_gpt2(params, y, y_mask, y_indices, random.PRNGKey(0), False) 
-#         new_toks = jnp.argmax(new_y[:, step_i], axis=-1)
-#         y = y.at[:,step_i+1].set(new_toks)
-#         return y
-    
-#     start_toks = jnp.full((y_mask.shape[0], sample_len), start_tok)
-#     y_sample = jax.lax.fori_loop(0, sample_len, predict_step, start_toks) 
-#     y_sample = jnp.where(jax.lax.cummax(y_sample, axis=1) != end_tok, y_sample, 0) # replace END token, and what follows with padding
+# NB: this is WIP, as it hasn't been tested in longer runs yet TODO XXX
+def predict(params, y_mask, y_indices, sample_len, start_tok, end_tok):
+    y_sample = torch.full((y_mask.shape[0], sample_len), start_tok, device=y_mask.device)
+    for step_i in range(sample_len-1):
+        new_y = batched_forward_gpt2(params, y_sample, y_mask, y_indices, False)
+        new_toks = torch.argmax(new_y[:, step_i], axis=-1)
+        y_sample[:,step_i+1]=new_toks
+    y_sample = torch.where(torch.cummax(y_sample, axis=1)[0], y_sample, 0) # replace END token, and what follows with padding
 
-#     y_sample = y_sample[:, 1:]
-#     return jnp.where(y_sample!=start_tok, y_sample, 0) # It should not be happening, but for random model it might.2
+    y_sample = y_sample[:, 1:]
+    return torch.where(y_sample!=start_tok, y_sample, 0) # It should not be happening, but for random model it might.
 
 def loss(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inputs: BS x N
     return _loss(batched_forward_gpt2, avg_cross_entropy_loss, params, y, y_mask, y_indices, train)

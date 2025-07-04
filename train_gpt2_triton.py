@@ -51,7 +51,7 @@ print(f'Vocabulary size: {model_vocab_size:_}')
 print(f'Number of params: {count_num_params(params):_}')
 
 # ### Loss + Grads + Optimizers
-from loss_and_optimizer_triton import loss_train, loss_eval, grad_loss, acc_grad_loss, t_acc_grad_loss, t_acc_grad_loss2, t_acc_grad_loss3, t_acc_grad_loss3_t, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms # TODO XXX: add remaining
+from loss_and_optimizer_triton import loss_train, loss_eval, grad_loss, predict, acc_grad_loss, t_acc_grad_loss, t_acc_grad_loss2, t_acc_grad_loss3, t_acc_grad_loss3_t, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms # TODO XXX: add remaining
 # from loss_and_optimizer import loss_train, loss_eval, log_probs, grad_loss, predict, acc_grad_loss, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms
 
 # Choose the accumulation gradient loss function depending on the selected ML backend
@@ -267,7 +267,8 @@ betas = (0.9, 0.98)
 epsilon = 10e-9
 grads, moments = init_adam_w(params)
 
-# TODO XXX: remove below one
+# TODO XXX: restructure, so we don't need below ones, and then, remove it
+# NB: we use it later for inference/sampling, but the mask might be padded here leading to incomplete sampling.
 _, _, _, y_eval_mask, _, _, y_eval_indices  = next(get_batched_examples(ds, eval_n_examples, seq_len, START_TOK, END_TOK, "validation")) 
     
 i = 0 
@@ -364,17 +365,15 @@ while True:
             writer.add_scalar('eval/loss', np.average(np.hstack(val_losses), weights = np.hstack(val_toks_props)).item(), i_multidevice)
             writer.add_scalar('eval/acc', np.average(np.hstack(val_accs), weights = np.hstack(val_toks_props)).item(), i_multidevice)
             
-# TODO XXX: Add predict and log_probs
-
             # Few predictions TODO XXX: vary temperature -> diff samples
-#             y_sample = predict(params, jnp.array(y_eval_mask), jnp.array(y_eval_indices), seq_len, START_TOK, END_TOK)
-#             y_sample = tuple([item.tolist() for item in y_sample])
-#             def detokenize_y_in(y):
-#                 y_out = y[:, 1:]
-#                 y_out[y_out == END_TOK] = 0
-#                 return detokenize(y_out)
-#             for detokenized_y_sample in detokenize(y_sample):
-#                 print(f'PREDS: {detokenized_y_sample}\n')
+            y_sample = predict(params, torch.tensor(y_eval_mask, dtype=torch.bool, device="cuda"), torch.tensor(y_eval_indices, dtype=torch.int, device="cuda"), seq_len, START_TOK, END_TOK)
+            y_sample = tuple([item.tolist() for item in y_sample])
+            def detokenize_y_in(y):
+                y_out = y[:, 1:]
+                y_out[y_out == END_TOK] = 0
+                return detokenize(y_out)
+            for detokenized_y_sample in detokenize(y_sample):
+                print(f'PREDS: {detokenized_y_sample}\n')
 
             # Compute HellaSwag score
 #             print(f'Compute HellaSwag score')
