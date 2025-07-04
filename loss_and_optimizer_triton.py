@@ -288,34 +288,30 @@ def t_loss_bkwd3_t(params, y, y_mask, y_indices, train, p_gen_aux=None):  # inpu
     
     return dloss_dx, (loss_val, acc, tokens_count/y_out.numel())
 
-# print(f'iter #{i} loss {loss_train(params, jnp.array(x[:1]), jnp.array(y[:1]), random.PRNGKey(0))[0] }')
+# TODO XXX: This is WIP: it hasn't been tested in the longer runs
+# TODO XXX: take y_prefix_len which not to ignore probs for?
+def log_probs(params, y, y_mask, y_indices):  # inputs: batch_size x seq_len
+    y_in = y[:, :-1]
+    y_out = y[:, 1:]
 
-# with jax.disable_jit():
-# print(f'iter #{i} loss {predict(params, jnp.array(x[:2], 50, START_TOK, END_TOK))}')
-
-# TODO XXX XXX: write some test for it?
-# @jit #TODO XXX: take y_prefix_len which not to ignore probs for?
-# def log_probs(params, y, y_mask, y_indices):  # inputs: batch_size x seq_len
-#     y_in = y[:, :-1]
-#     y_out = y[:, 1:]
-
-#     # copied a few lines from avg_cross_entropy_loss # TODO XXX XXX: reuse instead!
-#     def compute_log_probs(y_labels, x_logits): # y_labels: batch_len x seq_len, x_logits: batch_len x seq_len x vocab_size
-#         y_labels_1d = jnp.reshape(y_labels, -1) # there is probably a way of doing it while staying in 2d..
-#         x_logits_2d = jnp.reshape(x_logits, (y_labels.size, -1))
-#         elements_loss = log_softmax(x_logits_2d)[(jnp.arange(y_labels.size), y_labels_1d)]
-#         elements_loss = jnp.where(y_labels_1d != 0, elements_loss, 1) # account for padding tokens
-#         elements_loss_2d = jnp.reshape(elements_loss, (x_logits.shape[0], x_logits.shape[1]))
-#         y_log_probs = jnp.sum(elements_loss_2d, axis=1)
-#         return y_log_probs
+    # copied a few lines from avg_cross_entropy_loss # TODO XXX XXX: reuse instead!
+    def compute_log_probs(y_labels, x_logits): # y_labels: batch_len x seq_len, x_logits: batch_len x seq_len x vocab_size
+        b, n, v = x_logits.shape
+        b_n = y_labels.numel()
+        y_labels_1d = torch.reshape(y_labels, (-1,)) # there is probably a way of doing it while staying in 2d..
+        x_logits_2d = torch.reshape(x_logits, (b_n, -1))
+        elements_loss = log_softmax(x_logits_2d)[(torch.arange(b_n), y_labels_1d)]
+        elements_loss = torch.where(y_labels_1d != 0, elements_loss, 1) # account for padding tokens
+        elements_loss_2d = torch.reshape(elements_loss, (b, n))
+        y_log_probs = torch.sum(elements_loss_2d, axis=1)
+        return y_log_probs
     
-#     # TODO: write it without copying memory? is it possible? 
-#     logits = batched_forward_gpt2(params, y_in, y_mask, y_indices, random.PRNGKey(0), False) 
-#     return compute_log_probs(y_out, logits)
+    # TODO: write it without copying memory? is it possible? 
+    logits = batched_forward_gpt2(params, y_in, y_mask, y_indices, False) 
+    return compute_log_probs(y_out, logits)
 
-# # Accumulates gradients in place
-# @partial(jax.jit, donate_argnames=("acc_grads")) # TODO XXX: use torch.compile here. TODO XXX: What about in_place operations??
-#@torch.compile
+# Accumulates gradients in place
+#@torch.compile #TODO XXX: What about in_place operations??
 def acc_grad_loss(acc_grads, params, y, y_mask, y_indices):
     return _acc_grad_loss(grad_loss, acc_grads, params, y, y_mask, y_indices)
 

@@ -51,8 +51,7 @@ print(f'Vocabulary size: {model_vocab_size:_}')
 print(f'Number of params: {count_num_params(params):_}')
 
 # ### Loss + Grads + Optimizers
-from loss_and_optimizer_triton import loss_train, loss_eval, grad_loss, predict, acc_grad_loss, t_acc_grad_loss, t_acc_grad_loss2, t_acc_grad_loss3, t_acc_grad_loss3_t, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms # TODO XXX: add remaining
-# from loss_and_optimizer import loss_train, loss_eval, log_probs, grad_loss, predict, acc_grad_loss, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms
+from loss_and_optimizer_triton import loss_train, loss_eval, log_probs, grad_loss, predict, acc_grad_loss, t_acc_grad_loss, t_acc_grad_loss2, t_acc_grad_loss3, t_acc_grad_loss3_t, init_adam_w, adam_w_in_place, grads_l2norm, grads_grps_l2norms
 
 # Choose the accumulation gradient loss function depending on the selected ML backend
 # TODO XXX: differentiate forward func too
@@ -376,24 +375,24 @@ while True:
                 print(f'PREDS: {detokenized_y_sample}\n')
 
             # Compute HellaSwag score
-#             print(f'Compute HellaSwag score')
-#             hellaswag_accs = [] # TODO XXX: enable seq_len be different for x vs y; 
-#             num_hellaswag_batches = 100 #TODO XXX:; run for the whole dataset
-#             for _, batch in tqdm(enumerate(itertools.islice(get_batched_examples(hellaswag_ds, batch_size, seq_len, START_TOK, END_TOK, split=None), num_hellaswag_batches))):
-#                 choices_vals = []
-#                 x, y, _, y_mask, _, _, y_indices = batch
-#                 choices, labels = unpack_hellaswag_batched_x(x) 
+            print(f'Compute HellaSwag score')
+            hellaswag_accs = [] # TODO XXX: enable seq_len be different for x vs y; 
+            num_hellaswag_batches = 100 #TODO XXX:; run for the whole dataset
+            for _, batch in tqdm(enumerate(itertools.islice(get_batched_examples(hellaswag_ds, batch_size, seq_len, START_TOK, END_TOK, split=None), num_hellaswag_batches))):
+                choices_vals = []
+                x, y, _, y_mask, _, _, y_indices = batch
+                choices, labels = unpack_hellaswag_batched_x(x) 
                 
-#                 for choice in choices:
-#                     y, y_mask = concatenate_hellaswag_y_and_choice(y, choice, END_TOK) # no need to return new y_indices for now.
-#                     choice_log_probs = log_probs(params, jnp.array(y), jnp.array(y_mask), jnp.array(y_indices))
-#                     choices_vals.append(choice_log_probs)
-#                 choices_vals = np.array(choices_vals).transpose() # we want choice per column
-#                 hellaswag_accs.extend(np.argmax(choices_vals, axis=1)==labels)
+                for choice in choices:
+                    y, y_mask = concatenate_hellaswag_y_and_choice(y, choice, END_TOK) # no need to return new y_indices for now.
+                    choice_log_probs = log_probs(params, torch.tensor(y, dtype=torch.int32, device="cuda"), torch.tensor(y_mask, dtype=torch.bool, device="cuda"), torch.tensor(y_indices, dtype=torch.int, device="cuda"))
+                    choices_vals.append(choice_log_probs.cpu()) # TODO XXX: move to GPU
+                choices_vals = np.array(choices_vals).transpose() # we want choice per column
+                hellaswag_accs.extend(np.argmax(choices_vals, axis=1)==labels)
                    
-#             hellaswag_acc = sum(hellaswag_accs)/len(hellaswag_accs)
-#             print(f'HellaSwag score:', hellaswag_acc)
-#             writer.add_scalar('eval/hellaswag', hellaswag_acc, i_multidevice)
+            hellaswag_acc = sum(hellaswag_accs)/len(hellaswag_accs)
+            print(f'HellaSwag score:', hellaswag_acc)
+            writer.add_scalar('eval/hellaswag', hellaswag_acc, i_multidevice)
                 
         i = i + 1
         ds_train_rows_read = ds_train_rows_read + len(y)
