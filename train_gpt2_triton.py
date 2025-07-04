@@ -364,8 +364,11 @@ while True:
                 val_losses.append(loss_val.cpu())
                 val_accs.append(acc.cpu())
                 val_toks_props.append(toks_prop.cpu())
-            writer.add_scalar('eval/loss', np.average(np.hstack(val_losses), weights = np.hstack(val_toks_props)).item(), i_multidevice)
-            writer.add_scalar('eval/acc', np.average(np.hstack(val_accs), weights = np.hstack(val_toks_props)).item(), i_multidevice)
+            eval_loss = np.average(np.hstack(val_losses), weights = np.hstack(val_toks_props)).item()
+            eval_acc = np.average(np.hstack(val_accs), weights = np.hstack(val_toks_props)).item()
+            print(f'Evaluation at step {i_multidevice}: loss {eval_loss} acc {eval_acc}')
+            writer.add_scalar('eval/loss', eval_loss, i_multidevice)
+            writer.add_scalar('eval/acc', eval_acc, i_multidevice)
             
             # Few predictions TODO XXX: vary temperature -> diff samples
             y_sample = predict(params, torch.tensor(y_eval_mask, dtype=torch.bool, device="cuda"), torch.tensor(y_eval_indices, dtype=torch.int, device="cuda"), seq_len, START_TOK, END_TOK)
