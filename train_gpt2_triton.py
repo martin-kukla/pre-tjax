@@ -99,7 +99,7 @@ if args.test:
     logits_triton=torch.where(y_out.unsqueeze(2)!=0, logits_triton, 0)  
 
     assert torch.allclose(logits_torch_func, logits_triton, rtol=1e-2, atol=5e-3), (logits_torch_func.shape, logits_triton.shape, logits_torch_func[-2:, -4:, -10:], logits_triton[-2:, -4:, -10:])
-    print ("Forward pass test succesful")
+    print ("Forward pass test successful")
 
 
     ## BACKWARD test
@@ -132,7 +132,7 @@ if args.test:
     grad_l2norms_triton = grad_l2norms(grads_triton)
     for a, b in zip(grad_l2norms_torch_func, grad_l2norms_triton):
         torch.allclose(torch.tensor(a), torch.tensor(b))
-    print('Backward pass test succefull')
+    print('Backward pass test successful')
 
 
     # # Testing Memory Usage. I decided not to get too deep into it, since this uses torch.grad + torch.compile..
