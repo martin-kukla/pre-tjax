@@ -206,7 +206,7 @@ def predict(params, y_mask, y_indices, sample_len, start_tok, end_tok):
         new_y = batched_forward_gpt2(params, y_sample, y_mask, y_indices, False)
         new_toks = torch.argmax(new_y[:, step_i], axis=-1)
         y_sample[:,step_i+1]=new_toks
-    y_sample = torch.where(torch.cummax(y_sample, axis=1)[0], y_sample, 0) # replace END token, and what follows with padding
+    y_sample = torch.where(torch.cummax(y_sample, axis=1)[0] != end_tok, y_sample, 0) # replace END token, and what follows with padding
 
     y_sample = y_sample[:, 1:]
     return torch.where(y_sample!=start_tok, y_sample, 0) # It should not be happening, but for random model it might.
