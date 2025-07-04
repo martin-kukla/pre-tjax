@@ -9,6 +9,7 @@ parser.add_argument("backend", help="Either 'torchfunc_jit', 'triton', 'pre-trit
 parser.add_argument("--test", action='store_true')
 parser.add_argument("--profile", action='store_true')
 parser.add_argument("--eval_only", action='store_true')
+parser.add_argument("--from_checkpoint", type=str, default=None)
 args = parser.parse_args()
 assert args.backend in ["torchfunc_jit", "triton", "pre-triton", "debug_jacs"]
 
@@ -253,8 +254,6 @@ eval_n_examples = 4
 writer = SummaryWriter(f'/lego/storage/output/runs/{run_name}')
 #checkpoint_every_steps = None #500 * 8 machines
 checkpoint_every_steps = 4000 #20000 # TODO: move to use _multidevice too
-resume_from_checkpoint = None
-#resume_from_checkpoint = 'runs/Jun07_10-12-10/checkpoint_4000.pkl' # TODO: Confirm runs from checkpoints are still fully reproducible
 
 
 # ML training params 
@@ -273,8 +272,10 @@ _, _, _, y_eval_mask, _, _, y_eval_indices  = next(get_batched_examples(ds, eval
     
 i = 0 
 ds_train_rows_read = 0
-if resume_from_checkpoint is not None:
-    with open(resume_from_checkpoint,'rb') as f:
+# TODO XXX: does "from_checkpoint" reproduces original training?
+# It looks like it works fine for evals (i.e. it can reproduce the eval)
+if args.from_checkpoint is not None: 
+    with open(args.from_checkpoint,'rb') as f:
         i, ds_train_rows_read, params, moments = pickle.load(f)   
         print(f'Resuming training from the checkpoint: i {i} ds_train_rows_read {ds_train_rows_read}')
 
