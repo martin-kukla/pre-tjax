@@ -4,9 +4,10 @@ sys.path.append('../')
 import torch
 from model_triton import *
 
-layer_params = (torch.randn((768), device="cuda"), torch.randn((768), device="cuda"))
-aa = torch.randn((8, 512, 768), device="cuda")
-N = 10 #100
+BS, N, D = 8, 512, 768
+layer_params = (torch.randn((D), device="cuda"), torch.randn((D), device="cuda"))
+aa = torch.randn((BS, N, D), device="cuda")
+N_TRIALS = 10 #100
 
 from functools import partial
 def fn_naive(x):
@@ -17,7 +18,7 @@ _ = fn_jit(aa)
 
 import time
 t0 = time.time()
-for _ in range(N):
+for _ in range(N_TRIALS):
     result = fn_jit(aa)
     #result = fn_jit(dloss_dx, aa)
 torch.cuda.synchronize()
@@ -27,7 +28,7 @@ print(f'JIT total', total)
 
 import time
 t0 = time.time()
-for _ in range(N):
+for _ in range(N_TRIALS):
     result = fn_naive(aa)
     #result = fn_naive(dloss_dx, aa)
 torch.cuda.synchronize()
@@ -58,7 +59,7 @@ _ = fn_t(aa)
 
 import time
 t0 = time.time()
-for _ in range(N):
+for _ in range(N_TRIALS):
     result = fn_t(aa)
     #result = fn_t(dloss_dx, aa)
 torch.cuda.synchronize()
@@ -70,7 +71,7 @@ print(f'\ntriton.testing.Benchmark')
 import triton
 @triton.testing.perf_report(
     triton.testing.Benchmark(
-        x_names=['N'],  # Argument names to use as an x-axis for the plot.
+        x_names=['D'],  # Argument names to use as an x-axis for the plot.
         x_vals=[768], #[128 * i for i in range(2, 100)],  # Different possible values for `x_name`.
         #x_log=True,  # x axis is logarithmic.
         line_arg='provider',  # Argument name whose value corresponds to a different line in the plot.
@@ -79,12 +80,12 @@ import triton
         styles=[('blue', '-'), ('green', '-'), ('orange', '-')],  # Line styles.
         ylabel='GB/s',  # Label name for the y-axis.
         plot_name='t_dropout_fwd',  # Name for the plot. Used also as a file name for saving the plot.
-        args={'M':4096},  # Values for function arguments not in `x_names` and `y_name`.
+        args={'BS':BS, 'N':N},  # Values for function arguments not in `x_names` and `y_name`.
         # TODO T: Use real M i.e. 
     ))
-def benchmark(M, N, provider):
+def benchmark(BS, N, D, provider):
     #dloss_dx = torch.rand(size, device="cuda", dtype=torch.float32)    
-    x = torch.rand(M, N, device="cuda", dtype=torch.float32)
+    x = torch.rand(BS, N, D, device="cuda", dtype=torch.float32)
     stream = getattr(torch, "cuda").Stream() # TODO XXX XXX: what is this stream about?
     getattr(torch, "cuda").set_stream(stream)
     quantiles = [0.5, 0.2, 0.8]
