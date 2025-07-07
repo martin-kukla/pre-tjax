@@ -115,8 +115,8 @@ v = v.reshape(BS*H, N, D)
 output = torch.zeros_like(q)
 acts0 = torch.empty((BS*H, N), device=q.device)
 acts1 = torch.empty_like(acts0)
-BLOCK_SIZE_Q_N = 32
-BLOCK_SIZE_K_T_N = 32
+BLOCK_SIZE_Q_N = 128
+BLOCK_SIZE_K_T_N = 64
 BLOCK_SIZE_D = triton.next_power_of_2(D) #16
 
 k_t = torch.transpose(k, -2, -1)
