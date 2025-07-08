@@ -46,6 +46,38 @@ t1 = time.time()
 total = t1-t0
 print(f'Triton total', total)
 
+print(f'\ntriton.testing.Benchmark')
+import triton
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['BS'],  # Argument names to use as an x-axis for the plot.
+        x_vals=[8], #[128 * i for i in range(2, 100)],  # Different possible values for `x_name`.
+        #x_log=True,  # x axis is logarithmic.
+        line_arg='provider',  # Argument name whose value corresponds to a different line in the plot.
+        line_vals=['triton', 'torch', 'naive'],  # Possible values for `line_arg`.
+        line_names=['Triton', 'Torch', 'naive'],  # Label name for the lines.
+        styles=[('blue', '-'), ('green', '-'), ('orange', '-')],  # Line styles.
+        ylabel='GB/s',  # Label name for the y-axis.
+        plot_name='t_dropout_fwd',  # Name for the plot. Used also as a file name for saving the plot.
+        args={'N':N, 'V':V},  # Values for function arguments not in `x_names` and `y_name`.
+        # TODO T: Use real M i.e. 
+    ))
+def benchmark(BS, N, V, provider):
+    y_labels = torch.randint(V, (BS, N), device="cuda")
+    x_logits = torch.randn((BS, N, V), device="cuda")
+    stream = getattr(torch, "cuda").Stream() # TODO XXX XXX: what is this stream about?
+    getattr(torch, "cuda").set_stream(stream)
+    quantiles = [0.5, 0.2, 0.8]
+    if provider == 'torch':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: fn_jit(y_labels, x_logits), quantiles=quantiles)
+    if provider == 'triton':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: fn_t(y_labels, x_logits), quantiles=quantiles)        
+    if provider == 'naive':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: fn_naive(y_labels, x_logits), quantiles=quantiles)
+    gbps = lambda ms: 3 * x_logits.numel() * x_logits.element_size() * 1e-9 / (ms * 1e-3)
+    return gbps(ms), gbps(max_ms), gbps(min_ms)
+benchmark.run(print_data=True, show_plots=False)
+
 print(f'\nOther diagnostic')
 import torch
 print(torch.cuda.get_device_properties("cuda"))

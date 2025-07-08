@@ -44,7 +44,7 @@ t1 = time.time()
 total = t1-t0
 print(f'Triton total', total)
 
-print(f'\nOther diagnostic')
+print(f'\ntriton.testing.Benchmark')
 import triton
 import triton.language as tl
 @triton.testing.perf_report(
