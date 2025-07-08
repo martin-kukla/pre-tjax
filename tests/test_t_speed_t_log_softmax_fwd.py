@@ -1,13 +1,12 @@
+# IGNORE IGNORE IGNORE, we don't use this kernel anymore!
+
 import sys
 sys.path.append('../')
 
 import torch
 from model_triton import t_log_softmax_fwd, t_log_softmax_fwd_t
 
-#Two shapes are being used: [8, 12, 512, 512], and 4096, 35374
 aa = torch.randn((8, 12, 512, 512), device="cuda")
-#aa = torch.randn((4096, 35374), device="cuda")
-#aa = aa.view(-1)
 N_RUNS = 10
 
 fn_naive = t_log_softmax_fwd
