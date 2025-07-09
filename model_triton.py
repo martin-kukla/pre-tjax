@@ -227,7 +227,7 @@ def t_gelu_fwd(x):
 def tanh_k(x):
     return 2 * tl.sigmoid(2 * x) - 1
 
-gelu_k_const:tl.constexpr = math.sqrt(2/math.pi)
+gelu_k_const = tl.constexpr(math.sqrt(2/math.pi)) #:tl.constexpr = math.sqrt(2/math.pi)
 @triton.jit
 def gelu_k(x):
     return 0.5 * x * (1 + tanh_k(gelu_k_const * (x + 0.044715 * x * x * x)))

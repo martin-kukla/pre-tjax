@@ -26,8 +26,8 @@ wandb login
 
 
 # Corect packages of torch/triton for running torchfunc_jit/triton version
-pip install torch==2.6.0
-pip install triton==3.2.0
+pip install torch==2.7.1
+pip install triton==3.3.1
 pip install optree==0.14.0
 
 # Pin down numpy to the verion priox to 2.x
