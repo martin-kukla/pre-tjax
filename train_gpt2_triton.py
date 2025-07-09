@@ -259,8 +259,8 @@ checkpoint_every_steps = 4000 #20000 # TODO: move to use _multidevice too
 # ML training params 
 batch_size= 8 # 16 TODO XXX: WHY IT's not working for 16 like in JAX? 
 gradient_accumulations_steps = 32 #16 -is for JAX # TODO XXX: This means effective batch_size=256 instead of 512 used in the paper
-num_steps_multidevice = 10000 #100000 # TODO XXX: think what it should be for GPT2
-max_lr = 0.00025
+num_steps_multidevice = 100000 # TODO XXX: think what it should be for GPT2
+max_lr = 0.0005
 warmup_steps_multidevice= 2000
 betas = (0.9, 0.98) 
 epsilon = 10e-9
