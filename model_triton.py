@@ -716,7 +716,7 @@ def t_scaled_dot_prod_attn_fwd3_t(qkv:torch.Tensor, mask:torch.Tensor, train=Tru
     acts1 = torch.empty_like(acts0)
     
     # TODO T: check if some matrices are contiguous?
-    grid = (min(BS*H, 80),)
+    grid = (min(BS*H, 140),)
 
     # Tuned params given num_warps=8, and BS, H, N, D = 8, 12, 512, 64
     num_warps = 8
@@ -966,7 +966,7 @@ def t_scaled_dot_prod_attn_bkwd3_t(dloss_dx, acts, qkv:torch.Tensor, mask:torch.
     dloss_dv = torch.zeros_like(v)    
     
     # TODO T: check if some matrices are contiguous?
-    grid = (min(BS*H, 80),) # TODO T: We can bump it up to 160?
+    grid = (min(BS*H, 140),) # TODO T: We can bump it up to 160?
 
     # Tuned params given num_warps=8, and BS, H, N, D = 8, 12, 512, 64
     num_warps = 8
