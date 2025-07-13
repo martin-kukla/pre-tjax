@@ -227,6 +227,7 @@ def t_gelu_fwd(x):
 def tanh_k(x):
     return 2 * tl.sigmoid(2 * x) - 1
 
+# TODO XXX: remove?
 gelu_k_const = tl.constexpr(math.sqrt(2/math.pi)) #:tl.constexpr = math.sqrt(2/math.pi)
 @triton.jit
 def gelu_k(x):
@@ -300,7 +301,7 @@ def t_gelu_bkwd2_t(dloss_dx: torch.Tensor, x: torch.Tensor):
     output = torch.empty_like(x_1d)
     n_elements = output.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
-    t_gelu_bkwd2_k[grid](dloss_dx, x_1d, output, n_elements, BLOCK_SIZE=1024)
+    t_gelu_bkwd2_k[grid](dloss_dx, x_1d, output, n_elements, BLOCK_SIZE=1024) # TODO XXX: Shouldn't be dloss_dx_1d as first param!!??
     return output.reshape(x.shape)
 
 def t_linear_fwd(layer_params, x): # input: seq_len x emb_dim
