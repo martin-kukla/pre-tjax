@@ -67,7 +67,7 @@ print(f'\ntriton.testing.Benchmark')
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['BS'],  # Argument names to use as an x-axis for the plot.
-        x_vals=[8],
+        x_vals=[BS],
         #x_log=True,  # x axis is logarithmic.
         line_arg='provider',  # Argument name whose value corresponds to a different line in the plot.
         line_vals=['triton', 'torch', 'naive'],  # Possible values for `line_arg`.

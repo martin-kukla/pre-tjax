@@ -59,7 +59,7 @@ print(f'\ntriton.testing.Benchmark')
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['BS'],  # Argument names to use as an x-axis for the plot.
-        x_vals=[8],
+        x_vals=[BS],
         #x_vals=[128 * 2**i for i in range(0, 6)],
         #x_vals=[128 * i for i in range(2, 33)],  # Different possible values for `x_name`.
         #x_log=True,  # x axis is logarithmic.
