@@ -1,4 +1,5 @@
 ### PARAMS + MODEL
+# change the below to 0.0 if you want to compare backward passes
 DROPOUT_RATE = 0.1 # TODO: move it out, and pass as paramteter
 INIT_SCALE = 2e-2 # In my previous AIYAIN experiment, I used 0.1. TODO XXX:  setup up Xavier/Glorot for AIYAIN instead?
 
