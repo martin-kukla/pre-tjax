@@ -149,8 +149,8 @@ resume_from_checkpoint = None
 key_training = random.PRNGKey(0) 
 batch_size= 8 #16 
 gradient_accumulations_steps = 32 #16 # TODO XXX: This means effective batch_size=256 instead of 512 used in the paper
-num_steps_multidevice = 10000 #50000 #30000 #10000 #100000 # TODO XXX: think what it should be for GPT2
-max_lr = 0.00025
+num_steps_multidevice = 100000 # TODO XXX: think what it should be for GPT2
+max_lr = 0.0005
 warmup_steps_multidevice= 2000
 betas = (0.9, 0.98) 
 epsilon = 10e-9
